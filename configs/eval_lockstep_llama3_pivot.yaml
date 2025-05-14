@@ -1,0 +1,22 @@
+combine_strategy: "mean_prob"
+pad_to_multiple_of: 128
+output: outputs/eval_lockstep
+
+eval:
+  tasks: [arc_easy,arc_challenge,piqa,boolq,arithmetic,mmlu,ifeval,agieval_en,agieval_cn]
+  lengths: [128, 256, 512, 1024, 2048]
+  tokens_per_batch: 4096
+  add_bos: true
+  chat_template_mode: surround_instruct
+  confirm_run_unsafe_code: true
+
+models:
+  - pretrained_model_name_or_path: "/mnt/disks/persist/exports/20250511223137_qwen2_to_llama3_ours_agg_approx_gradmag_preserve_mag_20k"
+    tokenizer_name: "meta-llama/Llama-3.2-3B-Instruct:source=Llama3:target=Qwen2"
+    add_bos: true
+  - pretrained_model_name_or_path: "/mnt/disks/persist/exports/20250511215604_gemma2_to_llama3_ours_agg_approx_gradmag_preserve_mag_20k"
+    tokenizer_name: "meta-llama/Llama-3.2-3B-Instruct:source=Llama3:target=Gemma2"
+    add_bos: true
+  - pretrained_model_name_or_path: "benjamin/Llama-3.2-3B-Instruct-flax"
+    tokenizer_name: "meta-llama/Llama-3.2-3B-Instruct:source=Llama3"
+    add_bos: false

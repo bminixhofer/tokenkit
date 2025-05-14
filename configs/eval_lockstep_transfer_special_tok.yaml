@@ -1,0 +1,22 @@
+combine_strategy: "mean_prob"
+pad_to_multiple_of: 128
+output: outputs/eval_lockstep
+
+eval:
+  tasks: [arc_easy,arc_challenge,piqa,boolq,arithmetic,mmlu,ifeval,agieval_en,agieval_cn]
+  lengths: [128, 256, 512, 1024, 2048]
+  tokens_per_batch: 4096
+  add_bos: true
+  chat_template_mode: surround_instruct
+  confirm_run_unsafe_code: true
+
+models:
+  - pretrained_model_name_or_path: "/mnt/disks/persist/exports/20250513085058_gemma2_to_qwen2_ours_agg_approx_gradmag_preserve_mag_20k_transfer_special_tok"
+    tokenizer_name: "Qwen/Qwen2.5-1.5B:source=Qwen2:target=Qwen2"
+    add_bos: true
+  - pretrained_model_name_or_path: "/mnt/disks/persist/exports/20250513085100_llama3_to_qwen2_ours_agg_approx_gradmag_preserve_mag_20k_transfer_special_tok"
+    tokenizer_name: "Qwen/Qwen2.5-1.5B:source=Qwen2:target=Qwen2"
+    add_bos: true
+  - pretrained_model_name_or_path: "benjamin/Qwen2.5-1.5B-Instruct-flax"
+    tokenizer_name: "Qwen/Qwen2-1.5B-Instruct:source=Qwen2"
+    add_bos: false
