@@ -12,7 +12,7 @@ eval:
 
 models:
   - pretrained_model_name_or_path: "benjamin/Qwen2.5-1.5B-Instruct-flax" # pivot first
-    tokenizer_name: "Qwen/Qwen2-1.5B-Instruct:source=Qwen2"
+    tokenizer_name: "Qwen/Qwen2.5-1.5B:source=Qwen2"
     add_bos: false
   - pretrained_model_name_or_path: "benjamin/gemma-2-2b-it-flax"
     tokenizer_name: "google/gemma-2-2b-it:source=Gemma2"
