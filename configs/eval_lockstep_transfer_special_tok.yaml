@@ -13,10 +13,10 @@ eval:
 models:
   - pretrained_model_name_or_path: "/mnt/disks/persist/exports/20250513085058_gemma2_to_qwen2_ours_agg_approx_gradmag_preserve_mag_20k_transfer_special_tok"
     tokenizer_name: "Qwen/Qwen2.5-1.5B:source=Qwen2:target=Qwen2"
-    add_bos: true
+    add_bos: false
   - pretrained_model_name_or_path: "/mnt/disks/persist/exports/20250513085100_llama3_to_qwen2_ours_agg_approx_gradmag_preserve_mag_20k_transfer_special_tok"
     tokenizer_name: "Qwen/Qwen2.5-1.5B:source=Qwen2:target=Qwen2"
-    add_bos: true
+    add_bos: false
   - pretrained_model_name_or_path: "benjamin/Qwen2.5-1.5B-Instruct-flax"
     tokenizer_name: "Qwen/Qwen2-1.5B-Instruct:source=Qwen2"
     add_bos: false

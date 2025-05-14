@@ -13,10 +13,10 @@ eval:
 models:
   - pretrained_model_name_or_path: "/mnt/disks/persist/exports/20250511223137_qwen2_to_llama3_ours_agg_approx_gradmag_preserve_mag_20k"
     tokenizer_name: "meta-llama/Llama-3.2-3B-Instruct:source=Llama3:target=Qwen2"
-    add_bos: true
+    add_bos: false
   - pretrained_model_name_or_path: "/mnt/disks/persist/exports/20250511215604_gemma2_to_llama3_ours_agg_approx_gradmag_preserve_mag_20k"
     tokenizer_name: "meta-llama/Llama-3.2-3B-Instruct:source=Llama3:target=Gemma2"
     add_bos: true
   - pretrained_model_name_or_path: "benjamin/Llama-3.2-3B-Instruct-flax"
     tokenizer_name: "meta-llama/Llama-3.2-3B-Instruct:source=Llama3"
-    add_bos: false
+    add_bos: true
