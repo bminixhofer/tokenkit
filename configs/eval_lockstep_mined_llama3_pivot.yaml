@@ -21,4 +21,4 @@ models:
     tokenizer_name: "google/gemma-2-2b-it:source=Gemma2"
     add_bos: true
 
-baseline_mined_mapping_paths: [null, "artifacts/tokenizer_data/qwen_to_llama3", "artifacts/tokenizer_data/gemma2_to_llama3"]
+baseline_mined_mapping_paths: [null, "artifacts/tokenizer_data/qwen2_to_llama3", "artifacts/tokenizer_data/gemma2_to_llama3"]
