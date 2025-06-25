@@ -15,12 +15,11 @@ model_lora_rank: 64
 model_lora_alpha: 64
 train_embeddings: true
 
-bce_temp: 100.0
+binarization_temp: 100.0
 alm_diff_fn: "binary_ce"
 alm_mode: "space_merge+append_space"
 tokenizer_pair_data_path: "artifacts/tokenizer_data/math_llama3_to_llama3"
 tokenizer_pair_bias_threshold: 0.1
-tokenizer_pair_bias_threshold_side_path: null
 
 student:
   pretrained_model_name_or_path: "benjamin/Llama-3.2-3B-Instruct-flax"

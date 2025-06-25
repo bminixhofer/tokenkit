@@ -1,3 +1,7 @@
+"""
+Run cross-tokenizer distillation.
+"""
+
 import json
 import logging
 import os
@@ -46,81 +50,143 @@ class BaselineArgs:
     teacher_temperature: float = 1.0
     kd_rate: float = 0.5
     kd_temp: float = 2.0
+    gradnorm_alpha: float = 0.12
+    gradnorm_lr: float = 2.5e-2
 
 
 @dataclass
 class CrossTokenizerDistillArgs:
+    # list of losses to use, e.g. "[sft,alm_unconstrained]" to use SFT and cross-tokenizer distillation via ALM.
     losses: list[str]
+    # number of steps to train for.
     steps: int
+    # number of steps to warmup the learning rate linearly.
     warmup_steps: int
+    # name of the experiment, used for logging and saving checkpoints.
     name: str
+    # output directory for checkpoints and logs. CAREFUL: will be deleted if it exists.
     output: str
+    # number of CPU workers to use for e.g. data loading.
     num_workers: int
+    # interval to log training metrics at.
     log_interval: int
+    # interval to sync logged training metrics to the host.
+    # `sync_interval` is separate from `log_interval` since we might sometimes want to log very frequently, but not move the tensors to the host every time.
     sync_interval: int
+    # interval to evaluate the model.
     eval_interval: int
+    # interval to save the model checkpoint.
     save_interval: int
+    # name of the target tokenizer to transfer to as a byteify spec (see https://github.com/bminixhofer/tokenkit/blob/main/docs/byteification.md).
     target_tokenizer_name: str
+    # training data specification
     data: dict[str, Any]
+    # hypernet configuration
     hypernet: parse_args.HypernetArgs
+    # optimizer configuration
     optimizer: dict[str, Any]
+    # eval configuration, e.g. which LM harness likelihood scoring/generation tasks to run.
     eval: parse_args.EvalArgs
+    # student model configuration (pretrained weights path + tokenizer)
     student: parse_args.ModelArgs
+    # teacher model configuration (pretrained weights path + tokenizer)
     teacher: parse_args.ModelArgs | None = None
+    # baseline configuration, e.g. for MinED and DSKD. Likely only necessary to replicate experiments from a paper.
     baseline: BaselineArgs = field(default_factory=BaselineArgs)
+    # lowest-precision dtype. some parameters (e.g. trainable) will always be kept in fp32.
     dtype: str = "bfloat16"
+    # debug mode: run on CPU, disable optimizations.
     debug: bool = False
     seed: int = 1234
+    # maximum length (in tokens) of the teacher inputs.
     max_teacher_length: int = 512
+    # maximum length (in tokens) of the student inputs.
     max_student_length: int = 512
+    # multiple to pad to along the embedding (vocabulary) dimension.
     pad_to_multiple_of: int = 64
+    # whether to eval after the first training step (useful for debugging).
     eval_at_step_zero: bool = False
+    # whether to save after the first training step (useful for debugging).
     save_at_step_zero: bool = False
+    # whether to skip LM harness evaluation (useful for debugging).
     skip_lm_eval: bool = False
+    # output embedding mode: "preserve" to keep as is, "untie" to train input/output embeddings separately even if they were tied originally.
     output_embeddings_mode: str = "preserve"
+    # whether the data is in chat template format and should be decoded as such. usually true.
     use_chat_template: bool = True
+    # chat template mode, see `tokenkit.utils.preprocess_prompt` for details.
     chat_template_mode: str = "direct_encode"
+    # loss mask mode (only partially supported): None to compute the loss over all input tokens, "dolly" or "openmath2" for corpus-specific prompt masking.
     loss_mask_mode: str | None = None
+    # whether to use gradient checkpointing to save memory at the cost of compute. not implemeted for all models.
     gradient_checkpointing: bool = False
+    # whether to analyze training step cost (FLOPS and memory) then exit, or to run the training loop.
     do_cost_analysis: bool = False
+    # whether to run the training loop in dry-run mode, i.e. without actually training the model, only iterating over the data (useful for debugging).
     dry_run: bool = False
+    # FSDP data parallelism axis size
     n_data_parallel: int = 1
+    # FSDP model parallelism axis size
     n_model_parallel: int = 8
+    # loss weights. CAREFUL: does not have an effect for `approx_gradmag*` losses at the moment since the magnitude balancing cancels out the weights.
     loss_weights: list[float] | None = None
+    # loss schedules, e.g. ["linear", "cosine", "constant"] to use a linear warmup schedule for the first loss, cosine for the second, and constant for the third.
     loss_schedules: list[str] | None = None
+    # how to aggregate the losses. `None` uses a simple arithmetic sum of (weighted) losses. `approx_gradmag_preserve_mag` uses GradMag (see https://arxiv.org/pdf/2503.20083).
     multitask_aggregation_fn: str | None = None
-    gradnorm_alpha: float = 0.12
-    gradnorm_lr: float = 2.5e-2
-    bce_temp: float = 100.0
+    # temperature to calculate the ALM loss with.
+    binarization_temp: float = 100.0
+    # DEPRECATED distillation chunk sizes. should always be one.
     distill_chunk_sizes: list[int] = field(default_factory=lambda: [1])
+    # ALM loss distance function, e.g. "binary_ce" for binary cross-entropy.
     alm_diff_fn: str = "binary_ce"
+    # ALM loss numerator. usually keep "chunk_count".
     distill_main_path_numerator: str = "chunk_count"
+    # ALM loss denominator. usually keep "chunk_count".
     distill_main_path_denominator: str = "chunk_count"
+    # model training mode: "lora" to only train LoRA adapters, "full" to train the full model instead.
     train_model_mode: str = "lora"
+    # LoRA rank.
     model_lora_rank: int = 64
+    # LoRA alpha scaling factor.
     model_lora_alpha: int = 64
+    # whether to train or freeze the input embeddings. If a hypernet is used, and train_embeddings=False, the embeddings will still be
+    # updated (through the hypernet predictions), but not trained directly.
     train_embeddings: bool = True
+    # tokens to add to the target tokenizer.
     tokens_to_add: list[str] | None = None
+    # which latents to align, e.g. "last_hidden_state" for the last hidden state of the model.
     latents_to_align: str = "last_hidden_state"
+    # loss function to use for latent alignment.
     latents_normalization: str = "l2_channelwise"
+    # whether to use a naive or a more complex chunking strategy for the latents, usually "naive".
     latents_chunks: str = "naive"
+    # whether to project the latents, necessary if using the latents loss in a non-self-distillation setting.
+    # CAREFUL: we have not observed it helping in this setting, it is probably better to disable the latent loss when not self-distilling.
     latents_do_project: bool = False
-    side_path_mapping_mode: str | None = None
-    side_path_distance_fn: str = "kl"
-    alm_mode: str = "append_space"
+    # ALM loss mode, "append_space" means debiasing, should usually be added (see https://arxiv.org/abs/2503.20083).
+    # "merge_by_space_prob" means joining chunks such that the endings have a debiasing probability above the threshold, should usually be added.
+    alm_mode: str = "merge_by_space_prob+append_space"
+    # which bytes to assume to not cross token boundaries for debiasing.
     space_mask_mode: str = "space+tab+newline+special"
+    # path to tokenizer data directory, needed for e.g. the MinED baseline, but not necessary for the default ALM setting.
     tokenizer_pair_data_path: str | None = None
-    tokenizer_pair_bias_threshold: float = 1e-4
-    tokenizer_pair_bias_threshold_side_path: str | None = None
+    # chunk threshold, used for `merge_by_space_prob` chunk combination.
+    tokenizer_pair_bias_threshold: float = 0.1
+    # whether to expand the input IDs for conversion to the byte-level (see "Adjustments for Transfer to Bytes" section in https://arxiv.org/abs/2503.20083).
     expand_input_ids: bool = False
+    # GCP bucket to export the model checkpoints to. Only the name without the prefix, e.g. "my-bucket".
     export_to_gcs_bucket: str | None = None
+    # Dataset to use for perplexity evaluation. LM harness evaluation is usually more informative.
     ppl_eval_data: dict[str, Any] | None = None
 
 
 class TrainState(train_state.TrainState):
+    # logit masks are fp32 arrays which are 0 if not-masked, large negative number if masked.
     logit_mask_teacher: jnp.ndarray
     logit_mask_new: jnp.ndarray
     train_mask: Any
+    # space masks are boolean masks indicating which tokens start with a token-ending byte (as specified by `space_mask_mode`).
     space_mask_teacher: jnp.ndarray
     space_mask_new: jnp.ndarray
     gradnorm_state: Any = struct.field(pytree_node=True)
@@ -147,8 +213,12 @@ def get_state(
     optimizer_kwargs,
     shard_patterns,
 ):
+    """Creates the train state and puts all state data on the correct devices."""
+
     dtype = getattr(jnp, args.dtype)
 
+    # if teacher embeddings are not separately supplied, we are doing self-distillation
+    # in this case, the original embeddings are equivalent to the teacher embeddings
     if teacher_embeddings is None:
         teacher_embeddings = original_embeddings
 
@@ -222,9 +292,6 @@ def get_state(
             constant_values=0,
         )
 
-        model_params["expanded_input_ids_projection"] = np.zeros(
-            (original_embeddings.shape[-1], original_embeddings.shape[-1]), dtype=dtype
-        )
         model_params["original_embeddings"] = original_embeddings
 
     # add latent projectors
@@ -300,10 +367,6 @@ def get_state(
                 True,
             ],
             [
-                ("model", "expanded_input_ids_projection"),
-                True,
-            ],
-            [
                 ("model",),
                 (True if args.train_model_mode == "full" else False),
             ],
@@ -324,8 +387,9 @@ def get_state(
     )
 
     if args.multitask_aggregation_fn == "gradnorm":
+        # we need an extra GradNorm optimizer and state
         gradnorm_opt = optax.adamw(
-            learning_rate=args.gradnorm_lr,
+            learning_rate=args.baseline.gradnorm_lr,
         )
 
         gradnorm_state = {
@@ -476,10 +540,7 @@ def main(args: CrossTokenizerDistillArgs):
         logger.info("Adding tokens: %s", args.tokens_to_add)
         target_tokenizer.add_tokens(args.tokens_to_add)
 
-    if "baseline_mined" in args.losses or (
-        any(loss.startswith("distill_side_path") for loss in args.losses)
-        and args.side_path_mapping_mode == "mined"
-    ):
+    if "baseline_mined" in args.losses:
         mined_mapping = np.load(
             Path(args.tokenizer_pair_data_path) / "mined_mapping.npy"
         )
@@ -490,25 +551,8 @@ def main(args: CrossTokenizerDistillArgs):
     else:
         mined_mapping = mined_distances = None
 
-    if any(loss.startswith("distill_side_path") for loss in args.losses):
-        student_mapping, teacher_mapping = utils.get_side_path_mappings(
-            teacher_tokenizer=tokenizer_teacher,
-            student_tokenizer=target_tokenizer,
-            mode=args.side_path_mapping_mode,
-            tokenizer_pair_data_path=args.tokenizer_pair_data_path,
-            tokenizer_pair_bias_threshold=(
-                args.tokenizer_pair_bias_threshold_side_path
-                if args.tokenizer_pair_bias_threshold_side_path is not None
-                else args.tokenizer_pair_bias_threshold
-            ),
-            mined_mapping=mined_mapping,
-        )
-        logger.info(
-            f"Using {len(student_mapping)}/{len(target_tokenizer)} student tokens for side path alignment."
-        )
-    else:
-        student_mapping = teacher_mapping = None
-
+    # _do_init=False -> do not load parameters, parameters will be loaded separately
+    # since we want to manually manage their device placement
     teacher_model = FlaxAutoModelForCausalLM.from_config(
         teacher_config,
         dtype=dtype,
@@ -522,9 +566,11 @@ def main(args: CrossTokenizerDistillArgs):
         input_shape=(args.n_data_parallel, args.max_student_length),
     )
     if args.gradient_checkpointing:
+        # only supported for some models
         new_model.enable_gradient_checkpointing()
 
     model_params = param.load_params(**student_model_kwargs)
+    # we manage embeddings separately from the non-embedding parameters, and add them as needed.
     embeddings, model_params = param.stack_embeddings(
         model_params,
         student_config,
@@ -532,6 +578,7 @@ def main(args: CrossTokenizerDistillArgs):
     )
     embeddings = embeddings[: len(tokenizer_student_original)]
 
+    # embeddings can sometimes spuriously be smaller than the tokenizer, e.g if the tokenizer has some special unused tokens.
     if len(embeddings) < len(tokenizer_student_original):
         logger.warning(
             "Student embeddings are smaller than student tokenizer, padding embeddings with random embeddings."
@@ -557,6 +604,7 @@ def main(args: CrossTokenizerDistillArgs):
                 teacher_embeddings, tokenizer_teacher, seed=args.seed
             )
     else:
+        # self-distillation, teacher is student at t=0 and before tokenizer transfer.
         teacher_embeddings = None
         teacher_model_params = None
 
@@ -569,7 +617,6 @@ def main(args: CrossTokenizerDistillArgs):
             new_embeddings = pad_embeddings_with_random(
                 new_embeddings, target_tokenizer, seed=args.seed
             )
-        overlapping_embeddings_mask = np.ones(len(target_tokenizer), dtype=bool)
     else:
         diff_embeddings, original_to_new_indices, diff_indices = utils.fvt(
             tokenizer_student_original,
@@ -587,6 +634,8 @@ def main(args: CrossTokenizerDistillArgs):
         )
 
     if args.output_embeddings_mode == "untie" and new_embeddings.shape[1] == 1:
+        # embeddings have shape (vocab_size, n_embeddings, n_embd)
+        # to duplicate them if embeddings_mode="untie", we tile them across the n_embeddings dimension.
         student_config.tie_word_embeddings = False
         new_embeddings = jnp.tile(new_embeddings, (1, 2, 1))
 
@@ -649,17 +698,6 @@ def main(args: CrossTokenizerDistillArgs):
         f"Updated target vocab size: {student_config.vocab_size} (after padding)"
     )
 
-    overlapping_embeddings_mask = np.pad(
-        overlapping_embeddings_mask,
-        (
-            0,
-            utils.get_n_pad(
-                len(overlapping_embeddings_mask), student_config.vocab_size
-            ),
-        ),
-        mode="constant",
-        constant_values=False,
-    )
     hypernet_fn, teacher_model_fn, new_model_fn = (
         hypernet.apply,
         teacher_model.__call__,
@@ -710,7 +748,9 @@ def main(args: CrossTokenizerDistillArgs):
         wandb.init(project="tokenkit", name=args.name, config=asdict(args))
         wandb.run.log_code()
 
-    def predict_embeddings(params):  # TODO: add indices for subsampling
+    def predict_embeddings(params):
+        """Predict embeddings using the hypernet (identity if hypernet is disabled)."""
+
         embeddings = params["new_embeddings"]
         embeddings = jax.lax.with_sharding_constraint(
             embeddings, NamedSharding(mesh, P("model", None, "data"))
@@ -728,6 +768,8 @@ def main(args: CrossTokenizerDistillArgs):
         )
 
     def compute_inputs_embeds(model_params, input_ids, expanded_input_ids):
+        """Compute the input embeddings, expanding if enabled."""
+
         input_embeddings = param.get(
             model_params, param.get_input_embedding_path(student_config.model_type)
         )
@@ -894,17 +936,6 @@ def main(args: CrossTokenizerDistillArgs):
                     current_loss = losses.compute_sft_loss(args, loss_args)
                 elif loss == "alm_latents":
                     current_loss = losses.compute_alm_latents_loss(args, loss_args)
-                elif loss.startswith("alm_side_path"):
-                    kind = loss[len("alm_side_path_") :]
-                    if len(kind) == 0:
-                        kind = "unbiased"
-                    current_loss = losses.compute_alm_side_path_loss(
-                        chunk_kind=kind,
-                        student_mapping=student_mapping,
-                        teacher_mapping=teacher_mapping,
-                        args=args,
-                        loss_args=loss_args,
-                    )
                 elif loss.startswith("alm"):
                     kind = loss[len("alm_") :]
                     if len(kind) == 0:
@@ -1066,7 +1097,7 @@ def main(args: CrossTokenizerDistillArgs):
                 approx_grad_norm = jax.tree.map(lambda x, y: x * y, approx_grad_norm, w)
 
                 gw_avg = approx_grad_norm.mean()
-                constant = (gw_avg * rt ** args.gradnorm_alpha)
+                constant = (gw_avg * rt ** args.baseline.gradnorm_alpha)
                 return jnp.abs(approx_grad_norm - constant).mean()
 
             weight_grad = jax.grad(compute_gradnorm_loss, argnums=0)(

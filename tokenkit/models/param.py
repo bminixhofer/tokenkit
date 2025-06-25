@@ -1,5 +1,15 @@
+"""
+Tokenkit utilities to work with PyTrees of parameters.
+
+Tokenkit parameter paths frequently use a dot-separated string notation (e.g. "model.embed_tokens.embedding").
+This notation is parsed on-demand to access the parameters in a PyTree structure.
+
+The utilities here should work with both parameter trees of JAX and NumPy arrays.
+"""
+
 import copy
 import json
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -9,7 +19,17 @@ from transformers import AutoConfig
 from transformers.utils.hub import cached_file
 
 
-def get_input_embedding_path(model_type):
+def get_input_embedding_path(model_type: str) -> str:
+    """
+    Returns the path to the input embedding layer for a given model type. Must be present.
+
+    Args:
+        model_type (str): The type of the model, e.g. "gpt2", "roberta", "xlm-roberta", etc.
+
+    Returns:
+        str: The path to the input embedding layer in the model's parameter structure.
+    """
+
     return {
         "gpt2": "transformer.wte.embedding",
         "roberta": "roberta.embeddings.word_embeddings.embedding",
@@ -26,7 +46,17 @@ def get_input_embedding_path(model_type):
     }[model_type]
 
 
-def get_output_embedding_path(model_type):
+def get_output_embedding_path(model_type: str) -> str | None:
+    """
+    Returns the path to the output embedding layer for a given model type, or None if embeddings are tied.
+
+    Args:
+        model_type (str): The type of the model, e.g. "gpt2", "roberta", "xlm-roberta", etc.
+
+    Returns:
+        str | None: The path to the output embedding layer in the model's parameter structure if present.
+    """
+
     return {
         "gpt2": "lm_head.kernel",
         "roberta": None,
@@ -43,7 +73,17 @@ def get_output_embedding_path(model_type):
     }[model_type]
 
 
-def get_layer_path(model_type):
+def get_layer_path(model_type: str) -> str:
+    """
+    Returns the path to the layer dict of a model for a given model type.
+
+    Args:
+        model_type (str): The type of the model, e.g. "gpt2"
+
+    Returns:
+        str: The path to the layer dict in the model's parameter structure.
+    """
+
     return {
         "gemma2": "model.layers",
         "gemma3": "model.layers",
@@ -55,7 +95,23 @@ def get_layer_path(model_type):
     }[model_type]
 
 
-def load_params(**kwargs):
+def load_params(**kwargs) -> dict:
+    """
+    Returns parameters as a Pytree of NumPy arrays from a pretrained model on the HF hub or locally.
+    The parameters need to be put on TPU / converted to JAX arrays later.
+
+    The parameter source must have a `flax_model.msgpack` file or a `flax_model.msgpack.index.json` file.
+    If the index file is present, it will be used to load the parameters from multiple files
+    (e.g. for large models that are split into multiple shards).
+
+    Args:
+        **kwargs: Keyword arguments to pass to `AutoConfig.from_pretrained` and `cached_file`.
+            Must include `pretrained_model_name_or_path` and optionally e.g. `revision`.
+
+    Returns:
+        dict: A Pytree of NumPy arrays representing the model parameters.
+    """
+
     kwargs = copy.copy(kwargs)
     config = AutoConfig.from_pretrained(**kwargs)
     path = kwargs.pop("pretrained_model_name_or_path")
@@ -97,7 +153,19 @@ def load_params(**kwargs):
     return params
 
 
-def put(pytree, path, value):
+def put(pytree, path: str, value: dict | Any) -> dict:
+    """
+    Puts an array or subtree into a PyTree at the specified path out-of-place.
+
+    Args:
+        pytree (dict): The PyTree to modify.
+        path (str): The dot-separated path where the value should be inserted.
+        value (dict | jnp.ndarray): The value to insert.
+
+    Returns:
+        dict: A new PyTree with the value inserted at the specified path.
+    """
+
     path_tuple = tuple(path.split("."))
 
     flat_pytree = traverse_util.flatten_dict(pytree)
@@ -120,7 +188,19 @@ def put(pytree, path, value):
     return traverse_util.unflatten_dict(flat_pytree)
 
 
-def pop(pytree, path):
+def pop(pytree: dict, path: str)-> tuple[dict, Any]:
+    """
+    Pops a value or subtree from a PyTree at the specified path out-of-place.
+    
+    Args:
+        pytree (dict): The PyTree to modify.
+        path (str): The dot-separated path from which to pop the value.
+
+    Returns:
+        (params, popped_value): A tuple containing the modified PyTree and the popped value.
+            If the path does not exist, returns the original pytree and None.
+    """
+
     path_tuple = tuple(path.split("."))
     flat_pytree = traverse_util.flatten_dict(pytree)
     
@@ -149,7 +229,21 @@ def pop(pytree, path):
     return traverse_util.unflatten_dict(flat_pytree), value
 
 
-def get(pytree, path):
+def get(pytree: dict, path: str) -> Any:
+    """
+    Gets a value or subtree from a PyTree at the specified path.
+
+    Args:
+        pytree (dict): The PyTree to search.
+        path (str): The dot-separated path to the value.
+
+    Returns:
+        The value at the specified path, or a subtree if the path is a prefix.
+
+    Raises:
+        KeyError: If the path does not exist in the PyTree.
+    """
+
     path_tuple = tuple(path.split("."))
     flat = traverse_util.flatten_dict(pytree)
     # Find all keys that start with the given path
@@ -163,11 +257,30 @@ def get(pytree, path):
     return traverse_util.unflatten_dict(subkeys)
 
 
-def keys(pytree):
+def keys(pytree: dict) -> list[str]:
+    """Returns a list of all keys in the flattened PyTree as dot-separated strings."""
+
     return [".".join(x) for x in traverse_util.flatten_dict(pytree).keys()]
 
 
-def assign_embeddings(model_params, embeddings, config):
+def assign_embeddings(model_params: dict, embeddings: np.ndarray | jnp.ndarray, config) -> dict:
+    """
+    Assigns embeddings to the input and output embedding layers in the model parameters.
+    
+    Embeddings are expected to use a (vocab_size, n_embeddings, embedding_dim) representation.
+    (where n_embeddings=1 for tied embeddings and n_embeddings=2 for untied embeddings).
+
+    Args:
+        model_params (dict): The model parameters as a PyTree.
+        embeddings (np.ndarray | jnp.ndarray): The embeddings to assign, shape should be (vocab_size, n_embeddings, embedding_dim).
+            The first slice along the second dimension is used for input embeddings,
+            and the last slice is used for output embeddings if `config.tie_word_embeddings` is False.
+        config: The model configuration containing the model type and whether to tie embeddings.
+
+    Returns:
+        dict: The updated model parameters with the embeddings assigned.
+    """
+
     model_params = put(
         model_params,
         get_input_embedding_path(config.model_type),
@@ -183,7 +296,20 @@ def assign_embeddings(model_params, embeddings, config):
     return model_params
 
 
-def unassign_embeddings(model_params, config):
+def unassign_embeddings(model_params: dict, config) -> dict:
+    """
+    Unassigns input and output embeddings from the model parameters and deletes their buffers.
+
+    This is useful for freeing up memory when embeddings are not needed anymore.
+
+    Args:
+        model_params (dict): The model parameters as a PyTree.
+        config: The model configuration containing the model type.
+
+    Returns:
+        dict: The updated model parameters with the embeddings removed.
+    """
+
     model_params, x = pop(model_params, get_input_embedding_path(config.model_type))
     if isinstance(x, jnp.ndarray):
         x.delete()
@@ -197,7 +323,27 @@ def unassign_embeddings(model_params, config):
     return model_params
 
 
-def stack_embeddings(model_params, config, pop_embeddings=False):
+def stack_embeddings(model_params: dict, config, pop_embeddings: bool = False) -> tuple[np.ndarray, dict]:
+    """
+    Returns a stacked array of input and output embeddings from the model parameters
+    of shape (vocab_size, n_embeddings, embedding_dim).
+    (n_embeddings=1 for tied embeddings, n_embeddings=2 for untied embeddings).
+
+    Args:
+        model_params (dict): The model parameters as a PyTree.
+        config: The model configuration containing the model type and whether to tie embeddings.
+        pop_embeddings (bool): If True, removes the embeddings from the model parameters.
+
+    Returns:
+        tuple: A tuple containing:
+            - embeddings (np.ndarray): The stacked embeddings of shape (vocab_size, n_embeddings, embedding_dim).
+            - model_params (dict): The updated model parameters with embeddings removed if `pop_embeddings` is True.
+                (otherwise  the original model parameters are returned).
+
+    Raises:
+        KeyError: If the input or output embedding paths are not found in the model parameters.
+    """
+
     if config.tie_word_embeddings:
         input_embeddings = get(
             model_params, get_input_embedding_path(config.model_type)
@@ -215,7 +361,14 @@ def stack_embeddings(model_params, config, pop_embeddings=False):
         except KeyError:
             output_embeddings = input_embeddings.T
 
-        embeddings = np.stack([input_embeddings, output_embeddings.T], axis=1)
+        if isinstance(input_embeddings, jnp.ndarray):
+            embeddings = jnp.stack(
+                [input_embeddings, output_embeddings.T], axis=1
+            )
+        else:
+            embeddings = np.stack(
+                [input_embeddings, output_embeddings.T], axis=1
+            )
 
     if pop_embeddings:
         model_params = unassign_embeddings(model_params, config)
@@ -223,7 +376,22 @@ def stack_embeddings(model_params, config, pop_embeddings=False):
     return embeddings, model_params
 
 
-def get_num_layers(config):
+def get_num_layers(config) -> int:
+    """
+    Returns the number of layers in the model configuration.
+
+    The embedding layer is *not* included in the count (although it is typically treated as an extra layer in this codebase).
+
+    Args:
+        config: The model configuration object.
+
+    Returns:
+        int: The number of layers in the model.
+
+    Raises:
+        ValueError: If the number of layers cannot be determined from the configuration.
+    """
+
     if hasattr(config, "num_hidden_layers"):
         return config.num_hidden_layers
     elif hasattr(config, "n_layer"):  # gpt2
@@ -232,7 +400,17 @@ def get_num_layers(config):
         raise ValueError("Could not determine number of layers from config")
 
 
-def set_num_layers(config, num_layers):
+def set_num_layers(config, num_layers: int):
+    """
+    Sets the number of layers in the model configuration in-place.
+
+    Only updates the config, the param tree should be updated separately.
+
+    Args:
+        config: The model configuration object.
+        num_layers (int): The number of layers to set in the configuration.
+    """
+
     if hasattr(config, "num_hidden_layers"):
         config.num_hidden_layers = num_layers
     elif hasattr(config, "n_layer"):  # gpt2
@@ -241,7 +419,24 @@ def set_num_layers(config, num_layers):
         raise ValueError("Could not determine number of layers from config")
 
 
-def get_layer_n_mask(model_params, config, layer_idx):
+def get_layer_n_mask(model_params: dict, config, layer_idx: int) -> dict:
+    """
+    Get a Pytree of the same shape as `model_params` with boolean leaves which are 
+    True if the parameters at this position are within the layer with index `layer_idx`.
+
+    This is useful for masking parameters of a specific layer in the model.
+
+    Args:
+        model_params (dict): The model parameters as a PyTree.
+        config: The model configuration containing the model type.
+        layer_idx (int): The index of the layer to mask.
+
+    Returns:
+        A Pytree with the same structure as `model_params`, where each leaf
+            is a boolean indicating whether the parameter belongs to the specified layer.
+            True if the parameter is part of the layer, False otherwise.
+    """
+
     if layer_idx < 0:
         layer_idx = get_num_layers(config) + layer_idx
 
@@ -258,7 +453,38 @@ def get_layer_n_mask(model_params, config, layer_idx):
     return traverse_util.unflatten_dict(mask)
 
 
-def strip_layers(model_params, config, n_keep=1, mode="start", offset=0, layer_multiplier=None):
+def strip_layers(
+    model_params: dict,
+    config,
+    n_keep: int = 1,
+    mode: str = "start",
+    offset: int = 0,
+    layer_multiplier: np.ndarray | jnp.ndarray | None = None
+) -> dict:
+    """
+    Strips layers from the model parameters, keeping only a consecutive chunk of layers.
+    Also modifies the passed config in-place to reflect the new number of layers.
+
+    Args:
+        model_params (dict): The model parameters as a PyTree.
+        config: The model configuration containing the model type.
+        n_keep (int): The number of layers to keep.
+        mode (str): The mode of stripping layers. Can be "start" or "end".
+            - "start": keeps the first `n_keep` layers and removes the rest.
+            - "end": keeps the last `n_keep` layers and removes the rest.
+        offset (int): The number of layers to skip before starting to keep layers. Examples:
+            - If `offset=1` and `mode="start"`, the first layer will be skipped,
+            and the next `n_keep` layers will be kept.
+            - If  `offset=1` and `mode="end"`, the last layer will be skipped,
+            and  `n_keep` layers before will be kept.
+        layer_multiplier (np.ndarray | jnp.ndarray | None): Optional multiplier for the parameter magnitudes of the layers to keep.
+            If provided, must be of shape (n_keep,).
+
+    Returns:
+        dict: The updated model parameters with the specified layers stripped.        
+    """
+
+    # check how many layers we have params for in total, +1 since zero-indexed layers
     n_layers = max(int(x) for x in get(model_params, get_layer_path(config.model_type)).keys()) + 1
 
     example_layer_params = get(
