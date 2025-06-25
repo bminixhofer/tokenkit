@@ -23,6 +23,8 @@ LORA_PATTERNS = {
 }
 LORA_PATTERNS["tpu_llama"] = LORA_PATTERNS["llama"]
 LORA_PATTERNS["tpu_gemma2"] = LORA_PATTERNS["gemma2"]
+LORA_PATTERNS["gemma3"] = LORA_PATTERNS["gemma2"]
+LORA_PATTERNS["tpu_gemma3"] = LORA_PATTERNS["gemma2"]
 
 
 def init_lora_params(args, params, model_type, seed, dtype=jnp.float32):

@@ -108,6 +108,8 @@ SHARD_PATTERNS = {
 }
 SHARD_PATTERNS["tpu_llama"] = SHARD_PATTERNS["llama"]
 SHARD_PATTERNS["tpu_gemma2"] = SHARD_PATTERNS["gemma2"]
+SHARD_PATTERNS["gemma3"] = SHARD_PATTERNS["gemma2"]
+SHARD_PATTERNS["tpu_gemma3"] = SHARD_PATTERNS["gemma2"]
 
 def get_shard_patterns(kind):
     return SHARD_PATTERNS.get(kind, {})

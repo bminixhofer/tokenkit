@@ -89,6 +89,28 @@ class Qwen2ModelKind(BaseModelKind):
             "<|<assistant_name>|>": ["assistant"],
         }
 
+# Qwen3 does not require a bos token, but we add one for easier compatibility with other models
+# this is supported per https://github.com/QwenLM/Qwen3/issues/486#issuecomment-2153775104
+# the only difference between Qwen2 and Qwen3 model kind is that Qwen3 sets bos
+class Qwen3ModelKind(BaseModelKind):
+    @property
+    def special_tokens(self) -> List[str]:
+        return ["<|im_start|>", "<|im_end|>", "<|endoftext|>"]
+
+    @property
+    def replacements(self) -> Dict[str, Optional[List[str]]]:
+        return {
+            "<|<bos>|>": ["<|endoftext|>"],
+            "<|<pad>|>": ["<|endoftext|>"],
+            "<|<start_header>|>": ["<|im_start|>"],
+            "<|<end_header>|>": ["Ċ"],
+            "<|<eos>|>": ["<|endoftext|>"],
+            "<|<eot>|>": ["<|im_end|>", "Ċ"],
+            "<|<system_name>|>": ["system"],
+            "<|<user_name>|>": ["user"],
+            "<|<assistant_name>|>": ["assistant"],
+        }
+
 
 class Llama3ModelKind(BaseModelKind):
     @property
@@ -140,6 +162,10 @@ class Gemma2ModelKind(BaseModelKind):
             "<|<user_name>|>": ["user"],
             "<|<assistant_name>|>": ["model"],
         }
+
+
+class Gemma3ModelKind(Gemma2ModelKind):
+    pass
 
 
 class Phi3ModelKind(BaseModelKind):
@@ -233,8 +259,10 @@ class MistralModelKind(BaseModelKind):
 def get_model_kind_cls(model_kind: str) -> BaseModelKind:
     return {
         "Qwen2": Qwen2ModelKind(),
+        "Qwen3": Qwen3ModelKind(),
         "Llama3": Llama3ModelKind(),
         "Gemma2": Gemma2ModelKind(),
+        "Gemma3": Gemma3ModelKind(),
         "Phi3": Phi3ModelKind(),
         "GPT2": GPT2ModelKind(),
         "TinyLlama": TinyLlamaModelKind(),

@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from pprint import pformat
+import copy
 
 import flax
 import jax
@@ -259,7 +260,15 @@ def fvt(
     source_std = source_embeddings.std(0)
 
     one_to_one_special_tokens_map = {}
-    for k in model_kinds.BaseModelKind.SPECIAL_KEYS:
+    # special keys are ordered by importance (e.g., <bos> at the start)
+    # so we copy them in reverse order to ensure that the most important one wins
+    # in case of duplicates. This was a problem e.g. with transfer of Gemma3 to Qwen3:
+    # ```
+    # Copying special token <bos> -> <|endoftext|>
+    # Copying special token <pad> -> <|endoftext|>
+    # ```
+    # (before reversal <pad> overwrote <bos>)
+    for k in model_kinds.BaseModelKind.SPECIAL_KEYS[::-1]:
         v1 = source_tokenizer.model_kind_cls.replacements[k]
         v2 = target_tokenizer.model_kind_cls.replacements[k]
 
@@ -627,7 +636,15 @@ def init_linear(seed, in_shape, out_shape, dtype, **kwargs):
     )
 
 
-def compute_unigram_probabilities(tokenizer, counts, additive_smoothing_constant=1e-9):
+def compute_unigram_probabilities(tokenizer: ByteifyTokenizer, counts, additive_smoothing_constant=1e-9):
+    counts = {int(k): v for k, v in counts.items()}
+
+    # assign highest weight to special tokens
+    max_value = max(counts.values())
+    for special_token_id in tokenizer.all_special_ids:
+        logger.info(f"Assigning max count {max_value} to special token {special_token_id}")
+        counts[special_token_id] = max_value
+
     counts_sum = sum(counts.values())
     probs = np.array(
         [

@@ -24,6 +24,7 @@ class EvalArgs:
     add_bos: bool
     chat_template_mode: str
     confirm_run_unsafe_code: bool
+    limit: int | None = None
 
 @dataclass
 class ModelArgs:
@@ -95,8 +96,6 @@ def parse_args(cls):
                     raise ValueError(f"Invalid key: {key[-1]}")
                 current[int(key[-1])] = value
             elif isinstance(current, dict):
-                if key[-1] not in current:
-                    raise ValueError(f"Invalid key: {key[-1]}")
                 current[key[-1]] = value
             else:
                 if not hasattr(current, key[-1]):

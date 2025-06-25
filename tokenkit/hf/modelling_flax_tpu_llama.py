@@ -244,39 +244,33 @@ def create_sinusoidal_positions(num_pos, dim):
     return jnp.array(out[:, :, :num_pos])
 
 
+# Copied from transformers.models.llama.modeling_flax_llama.rotate_half
 def rotate_half(tensor):
     """Rotates half the hidden dims of the input."""
     rotate_half_tensor = jnp.concatenate(
-        (-tensor[..., tensor.shape[-1] // 2 :], tensor[..., : tensor.shape[-1] // 2]),
-        axis=-1,
+        (-tensor[..., tensor.shape[-1] // 2 :], tensor[..., : tensor.shape[-1] // 2]), axis=-1
     )
     return rotate_half_tensor
 
 
-def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
-    # TODO: get rid of swapaxes?
-    q = jnp.swapaxes(q, 2, 1)
-    k = jnp.swapaxes(k, 2, 1)
-
-    cos = jnp.expand_dims(cos, axis=unsqueeze_dim)
-    sin = jnp.expand_dims(sin, axis=unsqueeze_dim)
-
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
-
-    q_embed = jnp.swapaxes(q_embed, 2, 1)
-    k_embed = jnp.swapaxes(k_embed, 2, 1)
-
-    return q_embed, k_embed
+# Adapted from transformers.models.llama.modeling_flax_llama.apply_rotary_pos_emb
+def apply_rotary_pos_emb(tensor, sin_pos, cos_pos):
+    return (tensor * cos_pos[:, :, None, :]) + (rotate_half(tensor) * sin_pos[:, :, None, :])
 
 
 class FlaxTPULlamaRMSNorm(nn.Module):
     config: TPULlamaConfig
     dtype: jnp.dtype = jnp.float32
+    override_dim: int = None
 
     def setup(self):
+        if self.override_dim is not None:
+            dim = self.override_dim
+        else:
+            dim = self.config.hidden_size
+
         self.epsilon = self.config.rms_norm_eps
-        self.weight = self.param("weight", lambda _, shape: jnp.ones(shape), self.config.hidden_size)
+        self.weight = self.param("weight", lambda _, shape: jnp.ones(shape), dim)
 
     def __call__(self, hidden_states):
         variance = jnp.asarray(hidden_states, dtype=jnp.float32)
@@ -334,7 +328,7 @@ class FlaxTPULlamaAttention(nn.Module):
         config = self.config
         self.embed_dim = config.hidden_size
         self.num_heads = config.num_attention_heads
-        self.head_dim = self.embed_dim // self.num_heads
+        self.head_dim = getattr(config, "head_dim", self.embed_dim // self.num_heads)
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.attention_softmax_in_fp32 = self.dtype is not jnp.float32
@@ -350,6 +344,11 @@ class FlaxTPULlamaAttention(nn.Module):
         self.k_proj = dense(self.num_key_value_heads * self.head_dim)
         self.v_proj = dense(self.num_key_value_heads * self.head_dim)
         self.o_proj = dense(self.embed_dim)
+
+        if self.config.add_qk_norm:
+            self.q_norm = FlaxTPULlamaRMSNorm(self.config, dtype=self.dtype, override_dim=self.head_dim)
+            self.k_norm = FlaxTPULlamaRMSNorm(self.config, dtype=self.dtype, override_dim=self.head_dim)
+
         self.causal_mask = make_causal_mask(
             jnp.ones(
                 (1, getattr(config, "max_length", config.max_position_embeddings)),
@@ -357,13 +356,12 @@ class FlaxTPULlamaAttention(nn.Module):
             ),
             dtype="bool",
         )
-        self.rotary_emb = FlaxTPULlamaRotaryEmbedding(config, dtype=self.dtype)
 
     def _split_heads(self, hidden_states, num_heads):
         return hidden_states.reshape(hidden_states.shape[:2] + (num_heads, self.head_dim))
 
-    def _merge_heads(self, hidden_states):
-        return hidden_states.reshape(hidden_states.shape[:2] + (self.embed_dim,))
+    def _merge_heads(self, hidden_states, num_heads):
+        return hidden_states.reshape(hidden_states.shape[:2] + (num_heads * self.head_dim,))
 
     @nn.compact
     # Copied from transformers.models.gpt_neo.modeling_flax_gpt_neo.FlaxGPTNeoSelfAttention._concatenate_to_cache
@@ -401,6 +399,7 @@ class FlaxTPULlamaAttention(nn.Module):
     def __call__(
         self,
         hidden_states,
+        position_embeddings,
         attention_mask,
         position_ids,
         deterministic: bool = True,
@@ -415,8 +414,13 @@ class FlaxTPULlamaAttention(nn.Module):
         key = self._split_heads(raw_key, self.num_key_value_heads)
         value = self._split_heads(raw_value, self.num_key_value_heads)
 
-        cos, sin = self.rotary_emb(value, position_ids)
-        query, key = apply_rotary_pos_emb(query, key, cos, sin)
+        if self.config.add_qk_norm:
+            query = self.q_norm(query)
+            key = self.k_norm(key)
+
+        cos, sin = position_embeddings
+        query = apply_rotary_pos_emb(query, sin, cos)
+        key = apply_rotary_pos_emb(key, sin, cos)
 
         query_length, key_length = query.shape[1], key.shape[1]
 
@@ -477,7 +481,7 @@ class FlaxTPULlamaAttention(nn.Module):
             attn_weights = attn_weights.astype(self.dtype)
 
         attn_output = jnp.einsum("...hqk,...khd->...qhd", attn_weights, value)
-        attn_output = self._merge_heads(attn_output)
+        attn_output = self._merge_heads(attn_output, self.num_heads)
         attn_output = self.o_proj(attn_output)
 
         outputs = (attn_output, (raw_query, raw_key, raw_value)) if output_attentions else (attn_output,)
@@ -519,6 +523,7 @@ class FlaxTPULlamaFlashAttention(FlaxTPULlamaAttention):
     def __call__(
         self,
         hidden_states,
+        position_embeddings,
         attention_mask,
         position_ids,
         deterministic: bool = True,
@@ -533,8 +538,9 @@ class FlaxTPULlamaFlashAttention(FlaxTPULlamaAttention):
         key = self._split_heads(raw_key, self.num_key_value_heads)
         value = self._split_heads(raw_value, self.num_key_value_heads)
 
-        cos, sin = self.rotary_emb(value, position_ids)
-        query, key = apply_rotary_pos_emb(query, key, cos, sin)
+        cos, sin = position_embeddings
+        query = apply_rotary_pos_emb(query, sin, cos)
+        key = apply_rotary_pos_emb(key, sin, cos)
 
         query_length, key_length = query.shape[1], key.shape[1]
 
@@ -598,7 +604,7 @@ class FlaxTPULlamaFlashAttention(FlaxTPULlamaAttention):
             value,
         ).astype(hidden_states.dtype)
         attn_output = jnp.swapaxes(attn_output, 1, 2)
-        attn_output = self._merge_heads(attn_output)
+        attn_output = self._merge_heads(attn_output, self.num_heads)
         attn_output = self.o_proj(attn_output)
 
         outputs = (attn_output, (raw_query, raw_key, raw_value)) if output_attentions else (attn_output,)
@@ -647,6 +653,7 @@ class FlaxTPULlamaDecoderLayer(nn.Module):
     def __call__(
         self,
         hidden_states,
+        position_embeddings,
         attention_mask=None,
         position_ids=None,
         deterministic: bool = True,
@@ -660,6 +667,7 @@ class FlaxTPULlamaDecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
         outputs = self.self_attn(
             hidden_states,
+            position_embeddings,
             attention_mask=attention_mask,
             position_ids=position_ids,
             deterministic=deterministic,
@@ -677,11 +685,11 @@ class FlaxTPULlamaDecoderLayer(nn.Module):
             hidden_states, jax.sharding.NamedSharding(getattr(self.config, "mesh"), P("data", None, "model"))
         )
 
-        hidden_states = self.mlp(hidden_states)
+        mlp_output = self.mlp(hidden_states)
         # residual connection
-        hidden_states = residual + hidden_states
+        hidden_states = residual + mlp_output
 
-        return (hidden_states,) + outputs[1:]
+        return (hidden_states, attn_output, mlp_output)
 
 
 # Copied from transformers.models.gpt_neo.modeling_flax_gpt_neo.FlaxGPTNeoPreTrainedModel with GPTNeo->Llama, GPT_NEO->LLAMA, transformer->model
@@ -865,8 +873,10 @@ class FlaxTPULlamaLayerCollection(nn.Module):
     gradient_checkpointing: bool = False
 
     def setup(self):
+        self.rotary_emb = FlaxTPULlamaRotaryEmbedding(self.config, dtype=self.dtype)
+
         if self.gradient_checkpointing:
-            FlaxTPULlamaDecoderCheckpointLayer = remat(FlaxTPULlamaDecoderLayer, static_argnums=(3, 4, 5))
+            FlaxTPULlamaDecoderCheckpointLayer = remat(FlaxTPULlamaDecoderLayer, static_argnums=(4, 5, 6))
             self.blocks = [
                 FlaxTPULlamaDecoderCheckpointLayer(self.config, dtype=self.dtype, name=str(i))
                 for i in range(self.config.num_hidden_layers)
@@ -889,13 +899,18 @@ class FlaxTPULlamaLayerCollection(nn.Module):
         return_dict: bool = False,
     ):
         all_attentions = () if output_attentions else None
-        all_hidden_states = () if output_hidden_states else None
+        all_hidden_states = [(), ()] if output_hidden_states else None
 
-        for block in self.blocks:
-            if output_hidden_states:
-                all_hidden_states += (hidden_states,)
+        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+
+        if output_hidden_states:
+            all_hidden_states[0] += (hidden_states,)
+            all_hidden_states[1] += (hidden_states,)
+
+        for block_idx, block in enumerate(self.blocks):
             layer_outputs = block(
                 hidden_states,
+                position_embeddings,
                 attention_mask,
                 position_ids,
                 deterministic,
@@ -904,8 +919,13 @@ class FlaxTPULlamaLayerCollection(nn.Module):
             )
             hidden_states = layer_outputs[0]
 
+            if output_hidden_states:
+                if block_idx != len(self.blocks) - 1:
+                    all_hidden_states[0] += (hidden_states,)
+                all_hidden_states[1] += layer_outputs[1:]
+
             if output_attentions:
-                all_attentions += (layer_outputs[1],)
+                raise NotImplementedError("Attention outputs are not implemented for TPULLama (with projections).")
 
         # this contains possible `None` values - `FlaxTPULlamaModule` will filter them out
         outputs = (hidden_states, all_hidden_states, all_attentions)
@@ -930,6 +950,12 @@ class FlaxTPULlamaModule(nn.Module):
         self.layers = FlaxTPULlamaLayerCollection(self.config, dtype=self.dtype, gradient_checkpointing=self.gradient_checkpointing)
         self.norm = FlaxTPULlamaRMSNorm(self.config, dtype=self.dtype)
 
+    def embed(
+        self,
+        input_ids,
+    ):
+        return self.embed_tokens(input_ids.astype("i4"))
+
     def __call__(
         self,
         input_ids,
@@ -943,7 +969,7 @@ class FlaxTPULlamaModule(nn.Module):
         return_dict: bool = True,
     ):
         if inputs_embeds is None:
-            inputs_embeds = self.embed_tokens(input_ids.astype("i4"))
+            inputs_embeds = self.embed(input_ids)
 
         outputs = self.layers(
             inputs_embeds,
@@ -957,11 +983,17 @@ class FlaxTPULlamaModule(nn.Module):
         )
 
         hidden_states = outputs[0]
-        hidden_states = self.norm(hidden_states)
+
+        if not self.config.skip_out_norm:
+            hidden_states = self.norm(hidden_states)
 
         if output_hidden_states:
-            all_hidden_states = outputs[1] + (hidden_states,)
-            outputs = (hidden_states, all_hidden_states) + outputs[2:]
+            all_hidden_states = outputs[1]
+            all_hidden_states[0] += (hidden_states,)
+
+            # different from the HF default, `hidden_states` stores residual and non-residual representations
+            # at this point. we return only the first one, which is the residual representation, for consistency
+            outputs = (hidden_states, all_hidden_states[0]) + outputs[2:]
         else:
             outputs = (hidden_states,) + outputs[1:]
 
@@ -1006,6 +1038,9 @@ class FlaxTPULlamaForCausalLMModule(nn.Module):
             kernel_init=jax.nn.initializers.normal(stddev=self.config.initializer_range),
         )
 
+    def embed(self, input_ids):
+        return self.model.embed(input_ids)
+
     def __call__(
         self,
         input_ids,
@@ -1036,6 +1071,11 @@ class FlaxTPULlamaForCausalLMModule(nn.Module):
             lm_logits = self.lm_head.apply({"params": {"kernel": shared_kernel}}, hidden_states)
         else:
             lm_logits = self.lm_head(hidden_states)
+
+        lm_logits = jax.lax.with_sharding_constraint(
+            lm_logits,
+            jax.sharding.NamedSharding(getattr(self.config, "mesh"), P("data", None, "model")),
+        )
 
         if not return_dict:
             return (lm_logits,) + outputs[1:]
