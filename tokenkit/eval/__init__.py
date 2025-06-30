@@ -1,3 +1,14 @@
+"""
+LM evaluation harness compatible evaluation interface for JAX models.
+
+IMPORTANT NOTES:
+- Log-likelihood scoring sorts examples by length and processes them with a decreasing schedule of maximum lengths (e.g. 2048, 1024, 512, ...).
+    - This requires a recompile at every length change, causing progress to freeze for a few seconds.
+    - This wastes quite a bit of tokens on padding, it would be better to pack, but this would be more complex to implement.
+- Generation currently does not reshard. It uses FSDP which is fairly catastrophic for generation performance, so this part is really only suited to few examples.
+    - We need to figure out how to reshard/distribute generation across accelerators.
+"""
+
 import copy
 import logging
 import math

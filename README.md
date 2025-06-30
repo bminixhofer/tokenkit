@@ -63,8 +63,6 @@ pip install git+https://github.com/bminixhofer/lm-evaluation-harness
 # Install the library and the remaining dependencies
 pip install -r requirements.txt
 pip install -e .
-# You can ignore warnings from the command below, see https://github.com/bminixhofer/tokenkit/issues/4
-pip install paxml==1.4.0 praxis==1.4.0 --no-deps
 ```
 </details>
 
@@ -90,8 +88,6 @@ pip install git+https://github.com/bminixhofer/lm-evaluation-harness
 # Install the library and the remaining dependencies
 pip install -r requirements.txt
 pip install -e .
-# You can ignore warnings from the command below, see https://github.com/bminixhofer/tokenkit/issues/4
-pip install paxml==1.4.0 praxis==1.4.0 --no-deps
 ```
 </details>
 

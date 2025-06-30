@@ -30,7 +30,7 @@ from tokenkit.hf import get_config
 from tokenkit.training import losses, opt, lr, collators, checkpoint, multitask
 from tokenkit.utils import tqdm
 from tokenkit.models import param, sharding, lora
-from tokenkit.models.hypernet import Hypernet
+from tokenkit.models.hypernet import Hypernet, HypernetConfig
 from tokenkit.byteify import load_byteify_tokenizer
 
 logger = logging.getLogger(__name__)
@@ -344,13 +344,13 @@ def main(args: TrainZettHnArgs):
         model_params, param.get_input_embedding_path(teacher_config.model_type)
     ).shape[-1]
 
-    hypernet = Hypernet(
-        dtype=dtype,
+    hypernet_config = HypernetConfig(
         hidden_size=n_embd,
         num_embeddings=1 if teacher_config.tie_word_embeddings else 2,
         max_seq_length=args.collator.hn_surface_maxlen,
         **asdict(args.hypernet),
     )
+    hypernet = Hypernet(config=hypernet_config, dtype=dtype)
 
     # TODO: impl bias
     if args.compat:
@@ -457,7 +457,7 @@ def main(args: TrainZettHnArgs):
         train_mask = utils.label_by_prefix(
             params,
             [
-                [("hypernet", "non_trainable"), False],  # pax / praxis convention
+                ["hypernet.*rescaler.*", False],
                 [("hypernet",), True],
                 [("hypernet", "in_scaler"), False],  # compat,
                 [("hypernet", "out_scaler"), False],  # compat,

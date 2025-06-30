@@ -35,7 +35,7 @@ from tokenkit import data, eval, gcs_utils, parse_args, utils
 from tokenkit.hf import get_config
 from tokenkit.byteify import load_byteify_tokenizer
 from tokenkit.models import lora, param, sharding
-from tokenkit.models.hypernet import Hypernet
+from tokenkit.models.hypernet import Hypernet, HypernetConfig
 from tokenkit.training import checkpoint, collators, losses, lr, opt, multitask
 from tokenkit.utils import tqdm
 
@@ -97,6 +97,7 @@ class CrossTokenizerDistillArgs:
     dtype: str = "bfloat16"
     # debug mode: run on CPU, disable optimizations.
     debug: bool = False
+    # seed for e.g. randomly initialized parameters, data order.
     seed: int = 1234
     # maximum length (in tokens) of the teacher inputs.
     max_teacher_length: int = 512
@@ -342,10 +343,7 @@ def get_state(
     train_mask = utils.label_by_prefix(
         params,
         [
-            [
-                ("hypernet", "non_trainable"),
-                False,
-            ],  # pax / praxis convention
+            ["hypernet.*rescaler.*", False],
             [("hypernet",), True],
             [
                 ("teacher_model",),
@@ -645,14 +643,13 @@ def main(args: CrossTokenizerDistillArgs):
     logger.info(f"Space mask teacher sum: {space_mask_teacher.sum()}")
     logger.info(f"Space mask new sum: {space_mask_new.sum()}")
 
-    hypernet = Hypernet(
-        dtype=dtype,
+    hypernet_config = HypernetConfig(
         hidden_size=embeddings.shape[-1],
         num_embeddings=1 if student_config.tie_word_embeddings else 2,
         max_seq_length=1,
-        vocab_size=len(target_tokenizer),  # TODO: implement vocab padding
         **asdict(args.hypernet),
     )
+    hypernet = Hypernet(config=hypernet_config, dtype=dtype)
 
     optimizer_kwargs = args.optimizer
     learning_rate_fn = lr.linear_warmup_linear_decay_with_linear_prefix(

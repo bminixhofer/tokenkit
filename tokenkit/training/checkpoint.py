@@ -17,7 +17,7 @@ from jax.experimental import multihost_utils
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
 
-from tokenkit.models.hypernet import Hypernet
+from tokenkit.models.hypernet import Hypernet, HypernetConfig
 from tokenkit.models import param, lora, roa
 from tokenkit.hf import get_config
 
@@ -148,14 +148,14 @@ def export(
 
         n_embd = params["new_embeddings"].shape[-1]
 
-        hypernet = Hypernet(
-            dtype=dtype,
+        hypernet_config = HypernetConfig(
             hidden_size=n_embd,
             num_embeddings=1 if config.tie_word_embeddings else 2,
             max_seq_length=1,
-            vocab_size=config.vocab_size,
             **ckpt_args.hypernet,
         )
+
+        hypernet = Hypernet(config=hypernet_config, dtype=dtype)
         hypernet_fn = hypernet.apply
 
         def predict_embeddings(params):  # TODO: add indices for subsampling
