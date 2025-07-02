@@ -18,7 +18,7 @@ from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
 
 from tokenkit.models.hypernet import Hypernet, HypernetConfig
-from tokenkit.models import param, lora, roa
+from tokenkit.models import param, lora
 from tokenkit.hf import get_config
 
 logger = logging.getLogger(__name__)
