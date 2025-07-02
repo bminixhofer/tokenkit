@@ -792,7 +792,6 @@ class FlaxTPUGemma3Module(nn.Module):
 
         scaler = self.config.hidden_size ** 0.5
         inputs_embeds = inputs_embeds * scaler
-        inputs_embeds = inputs_embeds @ self.embedding_projection
 
         return inputs_embeds
 
