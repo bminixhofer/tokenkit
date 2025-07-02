@@ -836,14 +836,16 @@ def main(args: CrossTokenizerDistillArgs):
             )
 
             need_teacher = len([loss for loss in args.losses if loss != "sft"]) > 0
+            need_hidden_states = len([loss for loss in args.losses if loss in {"alm_latents", "baseline_dskd"}]) > 0
+
             if need_teacher:
                 teacher_out = teacher_model_fn(
                     input_ids=batch["input_ids_original"],
                     params=teacher_model_params,
                     dropout_rng=None,
                     train=False,
-                    output_hidden_states=True,
-                    output_attentions=True,
+                    output_hidden_states=need_hidden_states,
+                    output_attentions=need_hidden_states,
                 )
                 teacher_logits = (
                     teacher_out.logits.astype(jnp.float32)
@@ -872,8 +874,8 @@ def main(args: CrossTokenizerDistillArgs):
                 params=model_params_with_predicted_embeddings,
                 dropout_rng=None,
                 train=False,
-                output_hidden_states=True,
-                output_attentions=True,
+                output_hidden_states=need_hidden_states,
+                output_attentions=need_hidden_states,
             )
             student_logits = (
                 student_out.logits.astype(jnp.float32)
