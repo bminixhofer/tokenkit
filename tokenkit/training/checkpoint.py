@@ -135,13 +135,6 @@ def export(
             ckpt_args.model_lora_alpha,
         )
 
-    if "model_roa" in params:
-        logger.info("Materializing ROA parameters...")
-        merged_model_params = roa.materialize_roa(
-            merged_model_params,
-            params["model_roa"],
-        )
-
     if hasattr(ckpt_args, "hypernet"):
         # overwritten by hn outputs
         merged_model_params = param.unassign_embeddings(merged_model_params, config=config)
