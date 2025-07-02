@@ -1,0 +1,66 @@
+steps: 5_000
+warmup_steps: 2_000
+name: "unnamed"
+output: "outputs/cross_tokenizer_distill"
+num_workers: 16
+log_interval: 10
+sync_interval: 100
+eval_interval: 5000
+save_interval: 5000
+losses: [alm_unbiased]
+target_tokenizer_name: "Qwen/Qwen2.5-1.5B:source=Qwen2:target=Gemma2"
+
+train_model_mode: "lora"
+model_lora_rank: 64
+model_lora_alpha: 64
+train_embeddings: true
+
+binarization_temp: 100.0
+alm_diff_fn: "binary_ce"
+alm_mode: "append_space"
+tokenizer_pair_data_path: "artifacts/tokenizer_data/gemma2_to_qwen2"
+tokenizer_pair_bias_threshold: 1.e-4
+
+use_chat_template: true
+chat_template_mode: direct_encode_no_force_eos
+
+student:
+  pretrained_model_name_or_path: "benjamin/gemma-2-2b-it-flax"
+  tokenizer_name: "google/gemma-2-2b-it:source=Gemma2"
+
+data:
+  batch_size: 16
+  num_workers: 16
+  kind: "hf_saved"
+  lang_code: en
+  dataset_configs:
+    - path: /lfs/dolmino_50B_medium
+
+hypernet:
+  architecture: transformer
+  num_layers: 1
+  residual: true
+  residual_alpha: 1
+  use_attention: false
+
+optimizer:
+  type: adamw
+  weight_decay: 0.01
+  b1: 0.9
+  b2: 0.95
+  eps: 1.e-8
+  grad_acc_steps: null
+  learning_rate: 1.e-5
+  max_grad_norm: 1.0
+  param_groups:
+    - pattern: .*(projector_query|projector_s2t|projector_t2s|projector_latents|loss_weights).*
+      lr_scale: 2
+
+eval:
+  tasks: [arc_easy,arc_challenge,piqa,hellaswag,boolq,arithmetic,mmlu]
+  lengths: [128, 256, 512, 1024, 2048]
+  tokens_per_batch: 8192
+  add_bos: true
+  chat_template_mode: surround_instruct
+  confirm_run_unsafe_code: true
+  limit: null
