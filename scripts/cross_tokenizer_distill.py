@@ -336,7 +336,6 @@ def get_state(
             jax.random.PRNGKey(args.seed),
             params["new_embeddings"][:n_embed_init, None, :, :],
             jnp.ones((n_embed_init, 1), dtype=bool),
-            jnp.arange(n_embed_init, dtype=jnp.int32),
         ),
     )
 
@@ -757,7 +756,6 @@ def main(args: CrossTokenizerDistillArgs):
             params["hypernet"],
             embeddings[:, None, :, :],
             jnp.ones((embeddings.shape[0], 1), dtype=bool),
-            jnp.arange(embeddings.shape[0], dtype=jnp.int32),
         )
 
         return jax.lax.with_sharding_constraint(
