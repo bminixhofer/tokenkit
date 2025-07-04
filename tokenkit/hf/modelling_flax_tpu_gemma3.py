@@ -195,9 +195,6 @@ class FlaxTPUGemma3RMSNorm(nn.Module):
             self.weight = self.param("weight", lambda _, shape: jnp.ones(shape), self.config.hidden_size)
 
     def __call__(self, hidden_states):
-        if self.add_in_projection:
-            hidden_states = hidden_states @ self.in_projection
-
         variance = jnp.asarray(hidden_states, dtype=jnp.float32)
         variance = jnp.power(variance, 2)
         variance = variance.mean(-1, keepdims=True)
@@ -205,9 +202,6 @@ class FlaxTPUGemma3RMSNorm(nn.Module):
         hidden_states = hidden_states / jnp.sqrt(variance + self.epsilon)
 
         hidden_states = (1 + self.weight) * jnp.asarray(hidden_states, dtype=self.dtype)
-
-        if self.add_out_projection:
-            hidden_states = hidden_states @ self.out_projection
 
         return hidden_states
 
