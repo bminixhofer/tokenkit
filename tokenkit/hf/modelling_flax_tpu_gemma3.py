@@ -1,6 +1,7 @@
-"""Flax TPU Gemma2 model."""
+"""Flax TPU Gemma3 model."""
 
 from typing import Optional, Tuple
+import copy
 
 import flax.linen as nn
 import jax
@@ -17,16 +18,16 @@ from jax.sharding import PartitionSpec as P
 from transformers.modeling_flax_outputs import FlaxBaseModelOutput, FlaxCausalLMOutput
 from transformers.modeling_flax_utils import ACT2FN, FlaxPreTrainedModel, append_call_sample_docstring
 from transformers.utils import add_start_docstrings, add_start_docstrings_to_model_forward, logging
-from .configuration_tpu_gemma2 import TPUGemma2Config
+from .configuration_tpu_gemma3 import TPUGemma3Config
 
 
 logger = logging.get_logger(__name__)
 
-_CONFIG_FOR_DOC = "TPUGemma2Config"
+_CONFIG_FOR_DOC = "TPUGemma3Config"
 _CHECKPOINT_FOR_DOC = "google/gemma-2-2b"
 _REAL_CHECKPOINT_FOR_DOC = "openlm-research/open_llama_3b_v2"
 
-TPU_GEMMA2_START_DOCSTRING = r"""
+TPU_GEMMA3_START_DOCSTRING = r"""
 
     This model inherits from [`FlaxPreTrainedModel`]. Check the superclass documentation for the generic methods the
     library implements for all its model (such as downloading or saving, resizing the input embeddings, pruning heads
@@ -61,7 +62,7 @@ TPU_GEMMA2_START_DOCSTRING = r"""
             [`~FlaxPreTrainedModel.to_bf16`].
 """
 
-TPU_GEMMA2_INPUTS_DOCSTRING = r"""
+TPU_GEMMA3_INPUTS_DOCSTRING = r"""
     Args:
         input_ids (`numpy.ndarray` of shape `(batch_size, input_ids_length)`):
             Indices of input sequence tokens in the vocabulary. Padding will be ignored by default should you provide
@@ -111,14 +112,60 @@ TPU_GEMMA2_INPUTS_DOCSTRING = r"""
 
 remat = nn_partitioning.remat
 
-def create_sinusoidal_positions(num_pos, dim, theta=10000.0):
-    inv_freq = 1.0 / (theta ** (np.arange(0, dim, 2)[: (dim // 2)] / dim))
-    freqs = np.einsum("i , j -> i j", np.arange(num_pos), inv_freq).astype("float32")
+# adapted from modeling_rope_utils
+def _compute_default_rope_parameters(
+    config=None,
+    seq_len: Optional[int] = None,
+    **rope_kwargs,
+):
+    if config is not None and len(rope_kwargs) > 0:
+        raise ValueError(
+            "Unexpected arguments: `**rope_kwargs` and `config` are mutually exclusive in "
+            f"`_compute_default_rope_parameters`, got `rope_kwargs`={rope_kwargs} and `config`={config}"
+        )
+    if len(rope_kwargs) > 0:
+        base = rope_kwargs["base"]
+        dim = rope_kwargs["dim"]
+    elif config is not None:
+        base = config.rope_theta
+        partial_rotary_factor = config.partial_rotary_factor if hasattr(config, "partial_rotary_factor") else 1.0
+        head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+        dim = int(head_dim * partial_rotary_factor)
 
-    emb = np.concatenate((freqs, freqs), axis=-1)
-    out = np.concatenate((np.sin(emb)[:, None, :], np.cos(emb)[:, None, :]), axis=-1)
-    return jnp.array(out[:, :, :num_pos])
+    attention_factor = 1.0  # Unused in this type of RoPE
 
+    # Compute the inverse frequencies
+    inv_freq = 1.0 / (base ** (jnp.arange(0, dim, 2, dtype=jnp.int32).astype(jnp.float32) / dim))
+    return inv_freq, attention_factor
+
+def _compute_linear_scaling_rope_parameters(
+    config=None,
+    seq_len: Optional[int] = None,
+    **rope_kwargs,
+):
+    if config is not None and len(rope_kwargs) > 0:
+        raise ValueError(
+            "Unexpected arguments: `**rope_kwargs` and `config` are mutually exclusive in "
+            f"`_compute_linear_scaling_rope_parameters`, got `rope_kwargs`={rope_kwargs} and `config`={config}"
+        )
+    if len(rope_kwargs) > 0:
+        factor = rope_kwargs["factor"]
+    elif config is not None:
+        factor = config.rope_scaling["factor"]
+
+    # Gets the default RoPE parameters
+    inv_freq, attention_factor = _compute_default_rope_parameters(config, seq_len, **rope_kwargs)
+
+    # Then applies linear scaling to the frequencies.
+    # NOTE: originally, scaling was applied to the position_ids. However, we get `embs = inv_freq @ position_ids`, so
+    # applying scaling to the inverse frequencies is equivalent.
+    inv_freq /= factor
+    return inv_freq, attention_factor
+
+ROPE_INIT_FUNCTIONS = {
+    "default": _compute_default_rope_parameters,
+    "linear": _compute_linear_scaling_rope_parameters,
+}
 
 # Copied from transformers.models.llama.modeling_flax_llama.rotate_half
 def rotate_half(tensor):
@@ -129,18 +176,23 @@ def rotate_half(tensor):
     return rotate_half_tensor
 
 
-# Copied from transformers.models.llama.modeling_flax_llama.apply_rotary_pos_emb
+# Adapted from transformers.models.llama.modeling_flax_llama.apply_rotary_pos_emb
 def apply_rotary_pos_emb(tensor, sin_pos, cos_pos):
-    return (tensor * cos_pos) + (rotate_half(tensor) * sin_pos)
+    return (tensor * cos_pos[:, :, None, :]) + (rotate_half(tensor) * sin_pos[:, :, None, :])
 
 
-class FlaxTPUGemma2RMSNorm(nn.Module):
-    config: TPUGemma2Config
+class FlaxTPUGemma3RMSNorm(nn.Module):
+    config: TPUGemma3Config
+    dim_override: Optional[int] = None
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
         self.epsilon = self.config.rms_norm_eps
-        self.weight = self.param("weight", lambda _, shape: jnp.ones(shape), self.config.hidden_size)
+
+        if self.dim_override is not None:
+            self.weight = self.param("weight", lambda _, shape: jnp.ones(shape), self.dim_override)
+        else:
+            self.weight = self.param("weight", lambda _, shape: jnp.ones(shape), self.config.hidden_size)
 
     def __call__(self, hidden_states):
         variance = jnp.asarray(hidden_states, dtype=jnp.float32)
@@ -149,42 +201,62 @@ class FlaxTPUGemma2RMSNorm(nn.Module):
         # use `jax.numpy.sqrt` as `jax.lax.rsqrt` does not match `torch.rsqrt`
         hidden_states = hidden_states / jnp.sqrt(variance + self.epsilon)
 
-        return (1 + self.weight) * jnp.asarray(hidden_states, dtype=self.dtype)
+        hidden_states = (1 + self.weight) * jnp.asarray(hidden_states, dtype=self.dtype)
+
+        return hidden_states
 
 
-# Copied from transformers.models.llama.modeling_flax_llama.FlaxLlamaRotaryEmbedding with Llama->Gemma2
-class FlaxTPUGemma2RotaryEmbedding(nn.Module):
-    config: TPUGemma2Config
+# Copied from transformers.models.llama.modeling_flax_llama.FlaxLlamaRotaryEmbedding with Llama->Gemma3
+class FlaxTPUGemma3RotaryEmbedding(nn.Module):
+    config: TPUGemma3Config
     dtype: jnp.dtype = jnp.float32
 
-    # Ignore copy
     def setup(self):
-        head_dim = self.config.head_dim
-        self.sincos = create_sinusoidal_positions(self.config.max_position_embeddings, head_dim, self.config.rope_theta)
+        self.rope_kwargs = {}
 
-    def __call__(self, key, query, position_ids):
-        sincos = self.sincos[position_ids]
-        sin_pos, cos_pos = jnp.split(sincos, 2, axis=-1)
+        if self.config.rope_scaling is not None:
+            self.rope_type = self.config.rope_scaling.get("rope_type", self.config.rope_scaling.get("type"))
+        else:
+            self.rope_type = "default"
+        self.max_seq_len_cached = self.config.max_position_embeddings
+        self.original_max_seq_len = self.config.max_position_embeddings
 
-        key = apply_rotary_pos_emb(key, sin_pos, cos_pos)
-        query = apply_rotary_pos_emb(query, sin_pos, cos_pos)
+        self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
+        inv_freq, self.attention_scaling = self.rope_init_fn(self.config, **self.rope_kwargs)
+        self.inv_freq = self.original_inv_freq = inv_freq
 
-        key = jnp.asarray(key, dtype=self.dtype)
-        query = jnp.asarray(query, dtype=self.dtype)
+    def __call__(self, x, position_ids):
+        inv_freq_expanded = jnp.tile(
+            self.inv_freq[None, :, None].astype(jnp.float32),
+            (position_ids.shape[0], 1, 1),
+        )
+        position_ids_expanded = position_ids[:, None, :].astype(jnp.float32)
 
-        return key, query
+        freqs = jnp.swapaxes(jnp.matmul(inv_freq_expanded, position_ids_expanded), 1, 2)
+        emb = jnp.concatenate([freqs, freqs], axis=-1)
+        cos = jnp.cos(emb)
+        sin = jnp.sin(emb)
+
+        cos = cos * self.attention_scaling
+        sin = sin * self.attention_scaling
+
+        return cos.astype(x.dtype), sin.astype(x.dtype)
 
 
-class FlaxTPUGemma2Attention(nn.Module):
-    config: TPUGemma2Config
+class FlaxTPUGemma3Attention(nn.Module):
+    config: TPUGemma3Config
     layer_idx: int
     dtype: jnp.dtype = jnp.float32
     causal: bool = True
     is_cross_attention: bool = False
 
     def setup(self):
+        self.is_sliding = bool((self.layer_idx + 1) % self.config.sliding_window_pattern)
+        self.sliding_window = self.config.sliding_window if self.is_sliding else None
+
         config = self.config
         self.embed_dim = config.hidden_size
+
         self.num_heads = config.num_attention_heads
         self.head_dim = config.head_dim
 
@@ -212,11 +284,12 @@ class FlaxTPUGemma2Attention(nn.Module):
             dtype=self.dtype,
             kernel_init=kernel,
         )
+        self.q_norm = FlaxTPUGemma3RMSNorm(self.config, dtype=self.dtype, dim_override=self.head_dim)
+        self.k_norm = FlaxTPUGemma3RMSNorm(self.config, dtype=self.dtype, dim_override=self.head_dim)
+
         self.o_proj = nn.Dense(self.embed_dim, use_bias=config.attention_bias, dtype=self.dtype, kernel_init=kernel)
-        self.sliding_window = config.sliding_window if not bool(self.layer_idx % 2) else None
 
         self.causal_mask = make_causal_mask(jnp.ones((1, config.max_position_embeddings), dtype="bool"), dtype="bool")
-        self.rotary_emb = FlaxTPUGemma2RotaryEmbedding(config, dtype=self.dtype)
 
     def _split_heads(self, hidden_states, num_heads):
         return hidden_states.reshape(hidden_states.shape[:2] + (num_heads, self.head_dim))
@@ -260,6 +333,7 @@ class FlaxTPUGemma2Attention(nn.Module):
     def __call__(
         self,
         hidden_states,
+        position_embeddings,
         attention_mask,
         position_ids,
         deterministic: bool = True,
@@ -274,7 +348,13 @@ class FlaxTPUGemma2Attention(nn.Module):
         key = self._split_heads(raw_key, self.num_key_value_heads)
         value = self._split_heads(raw_value, self.num_key_value_heads)
 
-        key, query = self.rotary_emb(key, query, position_ids)
+        query = self.q_norm(query)
+        key = self.k_norm(key)
+
+        cos, sin = position_embeddings
+
+        key = jnp.asarray(apply_rotary_pos_emb(key, sin, cos), dtype=self.dtype)
+        query = jnp.asarray(apply_rotary_pos_emb(query, sin, cos), dtype=self.dtype)
 
         query_length, key_length = query.shape[1], key.shape[1]
 
@@ -349,8 +429,8 @@ class FlaxTPUGemma2Attention(nn.Module):
         return outputs
 
 
-class FlaxTPUGemma2MLP(nn.Module):
-    config: TPUGemma2Config
+class FlaxTPUGemma3MLP(nn.Module):
+    config: TPUGemma3Config
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
@@ -360,7 +440,7 @@ class FlaxTPUGemma2MLP(nn.Module):
         kernel_init = jax.nn.initializers.normal(self.config.initializer_range)
         if self.config.hidden_activation is None:
             logger.warning_once(
-                "Gemma2's activation function should be approximate GeLU and not exact GeLU. "
+                "Gemma3's activation function should be approximate GeLU and not exact GeLU. "
                 "Changing the activation function to `gelu_pytorch_tanh`."
                 f"if you want to use the legacy `{self.config.hidden_act}`, "
                 f"edit the `model.config` to set `hidden_activation={self.config.hidden_act}` "
@@ -383,23 +463,25 @@ class FlaxTPUGemma2MLP(nn.Module):
         return hidden_states
 
 
-# Copied from transformers.models.llama.modeling_flax_llama.FlaxLlamaDecoderLayer with Llama->Gemma2
-class FlaxTPUGemma2DecoderLayer(nn.Module):
-    config: TPUGemma2Config
+# Copied from transformers.models.llama.modeling_flax_llama.FlaxLlamaDecoderLayer with Llama->Gemma3
+class FlaxTPUGemma3DecoderLayer(nn.Module):
+    config: TPUGemma3Config
     layer_idx: int
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
-        self.input_layernorm = FlaxTPUGemma2RMSNorm(self.config, dtype=self.dtype)
-        self.self_attn = FlaxTPUGemma2Attention(self.config, self.layer_idx, dtype=self.dtype)
-        self.pre_feedforward_layernorm = FlaxTPUGemma2RMSNorm(self.config, dtype=self.dtype)
-        self.post_feedforward_layernorm = FlaxTPUGemma2RMSNorm(self.config, dtype=self.dtype)
-        self.post_attention_layernorm = FlaxTPUGemma2RMSNorm(self.config, dtype=self.dtype)
-        self.mlp = FlaxTPUGemma2MLP(self.config, dtype=self.dtype)
+        self.input_layernorm = FlaxTPUGemma3RMSNorm(self.config, dtype=self.dtype)
+        self.self_attn = FlaxTPUGemma3Attention(self.config, self.layer_idx, dtype=self.dtype)
+        self.pre_feedforward_layernorm = FlaxTPUGemma3RMSNorm(self.config, dtype=self.dtype)
+        self.post_feedforward_layernorm = FlaxTPUGemma3RMSNorm(self.config, dtype=self.dtype)
+        self.post_attention_layernorm = FlaxTPUGemma3RMSNorm(self.config, dtype=self.dtype)
+        self.mlp = FlaxTPUGemma3MLP(self.config, dtype=self.dtype)
 
     def __call__(
         self,
         hidden_states,
+        position_embeddings_global,
+        position_embeddings_local,
         attention_mask=None,
         position_ids=None,
         deterministic: bool = True,
@@ -413,8 +495,16 @@ class FlaxTPUGemma2DecoderLayer(nn.Module):
             )
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
+
+        # apply global RoPE to non-sliding layer only
+        if self.self_attn.is_sliding:
+            position_embeddings = position_embeddings_local
+        else:
+            position_embeddings = position_embeddings_global
+
         outputs = self.self_attn(
             hidden_states,
+            position_embeddings,
             attention_mask=attention_mask,
             position_ids=position_ids,
             deterministic=deterministic,
@@ -435,20 +525,20 @@ class FlaxTPUGemma2DecoderLayer(nn.Module):
         return (hidden_states, attn_output, mlp_output)
 
 
-# Copied from transformers.models.gpt_neo.modeling_flax_gpt_neo.FlaxGPTNeoPreTrainedModel with GPTNeo->Gemma2, GPT_NEO->Gemma2, transformer->model
-class FlaxTPUGemma2PreTrainedModel(FlaxPreTrainedModel):
+# Copied from transformers.models.gpt_neo.modeling_flax_gpt_neo.FlaxGPTNeoPreTrainedModel with GPTNeo->Gemma3, GPT_NEO->Gemma3, transformer->model
+class FlaxTPUGemma3PreTrainedModel(FlaxPreTrainedModel):
     """
     An abstract class to handle weights initialization and a simple interface for downloading and loading pretrained
     models.
     """
 
-    config_class = TPUGemma2Config
+    config_class = TPUGemma3Config
     base_model_prefix = "model"
     module_class: nn.Module = None
 
     def __init__(
         self,
-        config: TPUGemma2Config,
+        config: TPUGemma3Config,
         input_shape: Tuple = (1, 1),
         seed: int = 0,
         dtype: jnp.dtype = jnp.float32,
@@ -511,7 +601,7 @@ class FlaxTPUGemma2PreTrainedModel(FlaxPreTrainedModel):
         )
         return unfreeze(init_variables["cache"])
 
-    @add_start_docstrings_to_model_forward(TPU_GEMMA2_INPUTS_DOCSTRING)
+    @add_start_docstrings_to_model_forward(TPU_GEMMA3_INPUTS_DOCSTRING)
     def __call__(
         self,
         input_ids,
@@ -553,7 +643,7 @@ class FlaxTPUGemma2PreTrainedModel(FlaxPreTrainedModel):
 
         inputs = {"params": params or self.params}
 
-        # if past_key_values are passed then cache is already initialized a private flag init_cache has to be passed down to ensure cache is used. It has to be made sure that cache is marked as mutable so that it can be changed by FlaxGemma2Attention module
+        # if past_key_values are passed then cache is already initialized a private flag init_cache has to be passed down to ensure cache is used. It has to be made sure that cache is marked as mutable so that it can be changed by FlaxGemma3Attention module
         if past_key_values:
             inputs["cache"] = past_key_values
             mutable = ["cache"]
@@ -587,22 +677,34 @@ class FlaxTPUGemma2PreTrainedModel(FlaxPreTrainedModel):
         return outputs
 
 
-# Copied from transformers.models.llama.modeling_flax_llama.FlaxLlamaLayerCollection with Llama->Gemma2
-class FlaxTPUGemma2LayerCollection(nn.Module):
-    config: TPUGemma2Config
+# Copied from transformers.models.llama.modeling_flax_llama.FlaxLlamaLayerCollection with Llama->Gemma3
+class FlaxTPUGemma3LayerCollection(nn.Module):
+    config: TPUGemma3Config
     dtype: jnp.dtype = jnp.float32
     gradient_checkpointing: bool = False
 
     def setup(self):
+        self.rotary_emb = FlaxTPUGemma3RotaryEmbedding(config=self.config)
+
+        mesh = getattr(self.config, "mesh", None)
+        del self.config.mesh
+        local_config = copy.deepcopy(self.config)
+        if mesh is not None:
+            self.config.mesh = mesh
+
+        local_config.rope_theta = self.config.rope_local_base_freq
+        local_config.rope_scaling = {"rope_type": "default"}
+        self.rotary_emb_local = FlaxTPUGemma3RotaryEmbedding(config=local_config)
+
         if self.gradient_checkpointing:
-            FlaxTPUGemma2DecoderCheckpointLayer = remat(FlaxTPUGemma2DecoderLayer, static_argnums=(3, 4, 5))
+            FlaxTPUGemma3DecoderCheckpointLayer = remat(FlaxTPUGemma3DecoderLayer, static_argnums=(4, 5, 6))
             self.blocks = [
-                FlaxTPUGemma2DecoderCheckpointLayer(self.config, layer_idx, dtype=self.dtype, name=str(layer_idx))
+                FlaxTPUGemma3DecoderCheckpointLayer(self.config, layer_idx, dtype=self.dtype, name=str(layer_idx))
                 for layer_idx in range(self.config.num_hidden_layers)
             ]
         else:
             self.blocks = [
-                FlaxTPUGemma2DecoderLayer(self.config, layer_idx, dtype=self.dtype, name=str(layer_idx))
+                FlaxTPUGemma3DecoderLayer(self.config, layer_idx, dtype=self.dtype, name=str(layer_idx))
                 for layer_idx in range(self.config.num_hidden_layers)
             ]
 
@@ -620,6 +722,9 @@ class FlaxTPUGemma2LayerCollection(nn.Module):
         all_attentions = () if output_attentions else None
         all_hidden_states = [(), ()] if output_hidden_states else None
 
+        position_embeddings_global = self.rotary_emb(hidden_states, position_ids)
+        position_embeddings_local = self.rotary_emb_local(hidden_states, position_ids)
+
         if output_hidden_states:
             all_hidden_states[0] += (hidden_states,)
             all_hidden_states[1] += (hidden_states,)
@@ -627,6 +732,8 @@ class FlaxTPUGemma2LayerCollection(nn.Module):
         for block_idx, block in enumerate(self.blocks):
             layer_outputs = block(
                 hidden_states,
+                position_embeddings_global,
+                position_embeddings_local,
                 attention_mask,
                 position_ids,
                 deterministic,
@@ -643,39 +750,41 @@ class FlaxTPUGemma2LayerCollection(nn.Module):
                 all_hidden_states[1] += layer_outputs[1:]
 
             if output_attentions:
-                raise NotImplementedError("Attention outputs are not implemented for TPUGemma2 (with projections).")
+                raise NotImplementedError("Attention outputs are not implemented for TPUGemma3 (with projections).")
 
-        # this contains possible `None` values - `FlaxGemma2Module` will filter them out
+        # this contains possible `None` values - `FlaxGemma3Module` will filter them out
         outputs = (hidden_states, all_hidden_states, all_attentions)
 
         return outputs
 
 
-# Copied from transformers.models.llama.modeling_flax_llama.FlaxLlamaModule with Llama->Gemma2
-class FlaxTPUGemma2Module(nn.Module):
-    config: TPUGemma2Config
+# Copied from transformers.models.llama.modeling_flax_llama.FlaxLlamaModule with Llama->Gemma3
+class FlaxTPUGemma3Module(nn.Module):
+    config: TPUGemma3Config
     dtype: jnp.dtype = jnp.float32
     gradient_checkpointing: bool = False
 
     def setup(self):
         self.hidden_size = self.config.hidden_size
+
         embedding_init = jax.nn.initializers.normal(stddev=self.config.initializer_range)
+
         self.embed_tokens = nn.Embed(
             self.config.vocab_size,
             self.hidden_size,
             embedding_init=embedding_init,
             dtype=self.dtype,
         )
-        self.layers = FlaxTPUGemma2LayerCollection(self.config, dtype=self.dtype, gradient_checkpointing=self.gradient_checkpointing)
-        self.norm = FlaxTPUGemma2RMSNorm(self.config, dtype=self.dtype)
+        self.layers = FlaxTPUGemma3LayerCollection(self.config, dtype=self.dtype, gradient_checkpointing=self.gradient_checkpointing)
+        self.norm = FlaxTPUGemma3RMSNorm(self.config, dtype=self.dtype)
 
     def embed(
         self,
         input_ids,
     ):
         inputs_embeds = self.embed_tokens(input_ids.astype("i4"))
-        scaler = self.config.hidden_size ** 0.5
 
+        scaler = self.config.hidden_size ** 0.5
         inputs_embeds = inputs_embeds * scaler
 
         return inputs_embeds
@@ -716,6 +825,7 @@ class FlaxTPUGemma2Module(nn.Module):
             all_hidden_states = outputs[1]
 
             all_hidden_states[0] += (hidden_states,)
+
             # different from the HF default, `hidden_states` stores residual and non-residual representations
             # at this point. we return only the first one, which is the residual representation, for consistency
             outputs = (hidden_states, all_hidden_states[0]) + outputs[2:]
@@ -733,16 +843,16 @@ class FlaxTPUGemma2Module(nn.Module):
 
 
 @add_start_docstrings(
-    "The bare Gemma2 Model transformer outputting raw hidden-states without any specific head on top.",
-    TPU_GEMMA2_START_DOCSTRING,
+    "The bare Gemma3 Model transformer outputting raw hidden-states without any specific head on top.",
+    TPU_GEMMA3_START_DOCSTRING,
 )
-# Copied from transformers.models.llama.modeling_flax_llama.FlaxLlamaModel with Llama->Gemma2
-class FlaxTPUGemma2Model(FlaxTPUGemma2PreTrainedModel):
-    module_class = FlaxTPUGemma2Module
+# Copied from transformers.models.llama.modeling_flax_llama.FlaxLlamaModel with Llama->Gemma3
+class FlaxTPUGemma3Model(FlaxTPUGemma3PreTrainedModel):
+    module_class = FlaxTPUGemma3Module
 
 
 append_call_sample_docstring(
-    FlaxTPUGemma2Model,
+    FlaxTPUGemma3Model,
     _CHECKPOINT_FOR_DOC,
     FlaxBaseModelOutput,
     _CONFIG_FOR_DOC,
@@ -750,14 +860,14 @@ append_call_sample_docstring(
 )
 
 
-# Copied from transformers.models.llama.modeling_flax_llama.FlaxLlamaForCausalLMModule with Llama->Gemma2
-class FlaxTPUGemma2ForCausalLMModule(nn.Module):
-    config: TPUGemma2Config
+# Copied from transformers.models.llama.modeling_flax_llama.FlaxLlamaForCausalLMModule with Llama->Gemma3
+class FlaxTPUGemma3ForCausalLMModule(nn.Module):
+    config: TPUGemma3Config
     dtype: jnp.dtype = jnp.float32
     gradient_checkpointing: bool = False
 
     def setup(self):
-        self.model = FlaxTPUGemma2Module(self.config, dtype=self.dtype, gradient_checkpointing=self.gradient_checkpointing)
+        self.model = FlaxTPUGemma3Module(self.config, dtype=self.dtype, gradient_checkpointing=self.gradient_checkpointing)
         self.lm_head = nn.Dense(
             self.config.vocab_size,
             use_bias=False,
@@ -822,13 +932,13 @@ class FlaxTPUGemma2ForCausalLMModule(nn.Module):
 
 @add_start_docstrings(
     """
-    The Gemma2 Model transformer with a language modeling head (linear layer) on top.
+    The Gemma3 Model transformer with a language modeling head (linear layer) on top.
     """,
-    TPU_GEMMA2_START_DOCSTRING,
+    TPU_GEMMA3_START_DOCSTRING,
 )
-# Copied from transformers.models.gptj.modeling_flax_gptj.FlaxGPTJForCausalLM with GPTJ->Gemma2
-class FlaxTPUGemma2ForCausalLM(FlaxTPUGemma2PreTrainedModel):
-    module_class = FlaxTPUGemma2ForCausalLMModule
+# Copied from transformers.models.gptj.modeling_flax_gptj.FlaxGPTJForCausalLM with GPTJ->Gemma3
+class FlaxTPUGemma3ForCausalLM(FlaxTPUGemma3PreTrainedModel):
+    module_class = FlaxTPUGemma3ForCausalLMModule
 
     def prepare_inputs_for_generation(self, input_ids, max_length, attention_mask: Optional[jax.Array] = None):
         # initializing the cache
@@ -836,7 +946,7 @@ class FlaxTPUGemma2ForCausalLM(FlaxTPUGemma2PreTrainedModel):
 
         past_key_values = self.init_cache(batch_size, max_length)
         # Note that usually one would have to put 0's in the attention_mask for x > input_ids.shape[-1] and x < cache_length.
-        # But since Gemma2 uses a causal mask, those positions are masked anyways.
+        # But since Gemma3 uses a causal mask, those positions are masked anyways.
         # Thus we can create a single static attention_mask here, which is more efficient for compilation
         extended_attention_mask = jnp.ones((batch_size, max_length), dtype="i4")
         if attention_mask is not None:
@@ -858,7 +968,7 @@ class FlaxTPUGemma2ForCausalLM(FlaxTPUGemma2PreTrainedModel):
 
 
 append_call_sample_docstring(
-    FlaxTPUGemma2ForCausalLM,
+    FlaxTPUGemma3ForCausalLM,
     _CHECKPOINT_FOR_DOC,
     FlaxCausalLMOutput,
     _CONFIG_FOR_DOC,

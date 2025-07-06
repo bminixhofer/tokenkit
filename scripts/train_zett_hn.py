@@ -30,7 +30,7 @@ from tokenkit.hf import get_config
 from tokenkit.training import losses, opt, lr, collators, checkpoint, multitask
 from tokenkit.utils import tqdm
 from tokenkit.models import param, sharding, lora
-from tokenkit.models.hypernet import Hypernet
+from tokenkit.models.hypernet import Hypernet, HypernetConfig
 from tokenkit.byteify import load_byteify_tokenizer
 
 logger = logging.getLogger(__name__)
@@ -111,7 +111,7 @@ class TrainZettHnArgs:
     loss_weights: list[float] | None = None
     loss_schedules: list[str] | None = None
     multitask_aggregation_fn: str | None = None
-    bce_temp: float = 100.0
+    binarization_temp: float = 100.0
     distill_chunk_sizes: list[int] = field(default_factory=lambda: [1])
     alm_diff_fn: str = "binary_ce"
     distill_main_path_numerator: str = "chunk_count"
@@ -125,13 +125,10 @@ class TrainZettHnArgs:
     latents_normalization: str = "l2_channelwise"
     latents_chunks: str = "naive"
     latents_do_project: bool = False
-    side_path_mapping_mode: str | None = None
-    side_path_distance_fn: str = "kl"
     alm_mode: str = "append_space"
     space_mask_mode: str = "space+tab+newline+special"
     tokenizer_pair_data_path: str | None = None
     tokenizer_pair_bias_threshold: float = 1e-4
-    tokenizer_pair_bias_threshold_side_path: str | None = None
     expand_input_ids: bool = False
     export_to_gcs_bucket: str | None = None
     ppl_eval_data: dict[str, Any] | None = None
@@ -347,13 +344,13 @@ def main(args: TrainZettHnArgs):
         model_params, param.get_input_embedding_path(teacher_config.model_type)
     ).shape[-1]
 
-    hypernet = Hypernet(
-        dtype=dtype,
+    hypernet_config = HypernetConfig(
         hidden_size=n_embd,
         num_embeddings=1 if teacher_config.tie_word_embeddings else 2,
         max_seq_length=args.collator.hn_surface_maxlen,
         **asdict(args.hypernet),
     )
+    hypernet = Hypernet(config=hypernet_config, dtype=dtype)
 
     # TODO: impl bias
     if args.compat:
@@ -460,7 +457,7 @@ def main(args: TrainZettHnArgs):
         train_mask = utils.label_by_prefix(
             params,
             [
-                [("hypernet", "non_trainable"), False],  # pax / praxis convention
+                ["hypernet.*rescaler.*", False],
                 [("hypernet",), True],
                 [("hypernet", "in_scaler"), False],  # compat,
                 [("hypernet", "out_scaler"), False],  # compat,

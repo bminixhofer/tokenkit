@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from pprint import pformat
+import copy
 
 import flax
 import jax
@@ -259,7 +260,15 @@ def fvt(
     source_std = source_embeddings.std(0)
 
     one_to_one_special_tokens_map = {}
-    for k in model_kinds.BaseModelKind.SPECIAL_KEYS:
+    # special keys are ordered by importance (e.g., <bos> at the start)
+    # so we copy them in reverse order to ensure that the most important one wins
+    # in case of duplicates. This was a problem e.g. with transfer of Gemma3 to Qwen3:
+    # ```
+    # Copying special token <bos> -> <|endoftext|>
+    # Copying special token <pad> -> <|endoftext|>
+    # ```
+    # (before reversal <pad> overwrote <bos>)
+    for k in model_kinds.BaseModelKind.SPECIAL_KEYS[::-1]:
         v1 = source_tokenizer.model_kind_cls.replacements[k]
         v2 = target_tokenizer.model_kind_cls.replacements[k]
 
@@ -627,7 +636,15 @@ def init_linear(seed, in_shape, out_shape, dtype, **kwargs):
     )
 
 
-def compute_unigram_probabilities(tokenizer, counts, additive_smoothing_constant=1e-9):
+def compute_unigram_probabilities(tokenizer: ByteifyTokenizer, counts, additive_smoothing_constant=1e-9):
+    counts = {int(k): v for k, v in counts.items()}
+
+    # assign highest weight to special tokens
+    max_value = max(counts.values())
+    for special_token_id in tokenizer.all_special_ids:
+        logger.info(f"Assigning max count {max_value} to special token {special_token_id}")
+        counts[special_token_id] = max_value
+
     counts_sum = sum(counts.values())
     probs = np.array(
         [
@@ -639,74 +656,6 @@ def compute_unigram_probabilities(tokenizer, counts, additive_smoothing_constant
     probs /= probs.sum()
 
     return probs
-
-
-def get_side_path_mappings(
-    teacher_tokenizer,
-    student_tokenizer,
-    mode,
-    tokenizer_pair_data_path=None,
-    tokenizer_pair_bias_threshold=None,
-    mined_mapping=None,
-):
-    if mode == "mined":
-        assert mined_mapping is not None
-        student_mapping = np.arange(len(student_tokenizer))
-        teacher_mapping = mined_mapping
-    elif mode in {"exact_match", "bias_threshold"}:
-        student_tokens = student_tokenizer.convert_ids_to_tokens(
-            np.arange(len(student_tokenizer))
-        )
-        teacher_vocab = teacher_tokenizer.get_vocab()
-
-        student_mapping = []
-        teacher_mapping = []
-
-        for student_idx, token in enumerate(student_tokens):
-            if token in teacher_vocab:
-                student_mapping.append(student_idx)
-                teacher_mapping.append(teacher_vocab[token])
-
-        if mode == "bias_threshold":
-            assert tokenizer_pair_data_path is not None
-            assert tokenizer_pair_bias_threshold is not None
-            bias1_matrix = sparse.load_npz(
-                Path(tokenizer_pair_data_path) / "bias1_matrix.npz"
-            ).todok()
-            bias2_matrix = sparse.load_npz(
-                Path(tokenizer_pair_data_path) / "bias2_matrix.npz"
-            ).todok()
-
-            teacher_length, student_length = bias1_matrix.shape
-
-            for student_idx, teacher_idx in zip(
-                student_mapping.copy(), teacher_mapping.copy()
-            ):
-                if (
-                    student_idx >= student_length
-                    or teacher_idx >= teacher_length
-                    or (
-                        (
-                            bias1_matrix[teacher_idx, student_idx]
-                            <= tokenizer_pair_bias_threshold
-                        )
-                        and (
-                            bias2_matrix[teacher_idx, student_idx]
-                            <= tokenizer_pair_bias_threshold
-                        )
-                    )
-                ):
-                    continue
-
-                student_mapping.remove(student_idx)
-                teacher_mapping.remove(teacher_idx)
-
-        student_mapping = np.array(student_mapping, dtype=np.int32)
-        teacher_mapping = np.array(teacher_mapping, dtype=np.int32)
-    else:
-        raise ValueError(f"Unknown side path mapping mode: {mode}")
-
-    return student_mapping, teacher_mapping
 
 
 @pytest.mark.parametrize(

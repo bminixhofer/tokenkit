@@ -1,3 +1,13 @@
+"""
+Tokenkit sharding mechanism and sharding utilities.
+
+Defines sharding patterns for various model architectures.
+
+- Assumes a mesh with "data" (less communication) and "model" (more communication) dimensions.
+- Assumes sharding is applied to parameters in a state with keys "params" (parameters) and "opt_state" (optimizer state).
+- Only FSDP is supported for now.
+"""
+
 import logging
 
 import jax
@@ -108,12 +118,30 @@ SHARD_PATTERNS = {
 }
 SHARD_PATTERNS["tpu_llama"] = SHARD_PATTERNS["llama"]
 SHARD_PATTERNS["tpu_gemma2"] = SHARD_PATTERNS["gemma2"]
+SHARD_PATTERNS["gemma3"] = SHARD_PATTERNS["gemma2"]
+SHARD_PATTERNS["tpu_gemma3"] = SHARD_PATTERNS["gemma2"]
 
-def get_shard_patterns(kind):
+def get_shard_patterns(kind: str) -> dict:
+    """
+    Get the sharding patterns for a given model kind.
+    """
+
     return SHARD_PATTERNS.get(kind, {})
 
 
-def get_sharding_fn(shard_patterns, mesh):
+def get_sharding_fn(shard_patterns: dict, mesh: jax.sharding.Mesh) -> callable:
+    """
+    Returns a function that, when applied to a pytree, returns a pytree of the same structure
+    with `jax.sharding.PartitionSpec` objects for each leaf, based on the provided sharding patterns.
+
+    Args:
+        shard_patterns (dict): A dictionary where keys are regex patterns and values are partition specs.
+        mesh (jax.sharding.Mesh): The JAX mesh to use for sharding.
+
+    Returns:
+        A function that takes a pytree and returns a pytree of sharding specs.
+    """
+
     name_to_size = {name: size for name, size in mesh.shape_tuple}
 
     def get_pspec(path, v):
@@ -160,7 +188,26 @@ def get_sharding_fn(shard_patterns, mesh):
     return get_tree_shardings
 
 
-def to_global_array(pytree, pytree_sharding=None):
+def to_global_array(pytree: dict, pytree_sharding: dict | None = None) -> dict:
+    """
+    Converts a pytree of local arrays to a pytree of global arrays with the same shape and contents
+    (plus the supplied sharding).
+
+    Recall: a global array is a JAX array that is sharded across multiple global devices (i.e. multi-node, like on a TPU pod), whereas
+    a local array is a JAX array that is only shardeda cross the local devices (e.g. a single TPU slice).
+
+    For this to be correct, the pytree must be exactly the same on all local devices (e.g. no differently randomly initialized parameters).
+
+    Args:
+        pytree: A pytree of local arrays (e.g. parameters, optimizer state).
+        pytree_sharding: A pytree of sharding specs (e.g. PartitionSpec
+    
+    Returns:
+        A pytree of global arrays, where each leaf is a JAX array that is sharded across the global devices.
+        If `pytree_sharding` is None, the returned pytree will be fully replicated.
+    """
+
+
     if pytree_sharding is None:
         pytree_sharding = jax.tree.map(lambda _: None, pytree)
 
@@ -180,13 +227,45 @@ def to_global_array(pytree, pytree_sharding=None):
 
 
 def sync_across_devices(pytree):
+    """
+    Synchronizes a pytree across all devices via allgather + setting the  first device's value.
+
+    Should usually be avoided, but useful to sync the contents of e.g. data batches (which can be different on each device).
+
+    Args:
+        pytree: The pytree to synchronize across devices. Each leaf must be a JAX array.
+
+    Returns:
+        A pytree with the same structure as `pytree`, but with all leaves synchronized.
+    """
+
     if jax.process_count() == 1:
         return pytree
 
     return jax.tree.map(lambda x: x[0], process_allgather(pytree))
 
 
-def to_devices(pytree, pytree_sharding=None, dtype=None):
+def to_devices(pytree: dict, pytree_sharding=None, dtype=None):
+    """
+    Converts a pytree of local arrays to a pytree of global arrays with the same shape and contents,
+    plus the supplied sharding and dtype.
+
+    See `to_global_array` for more details.
+
+    The reason to supply this function in addition to `to_global_array` has been lost to time.
+    Potentially only convenience to update the dtype. Reinvestigate?
+
+    Args:
+        pytree: A pytree of local arrays (e.g. parameters, optimizer state).
+        pytree_sharding: A pytree of sharding specs (e.g. PartitionSpec
+        dtype: The dtype to cast the arrays to. If None, no casting is done.
+
+    Returns:
+        A pytree of global arrays, where each leaf is a JAX array that is sharded across the global devices.
+        If `pytree_sharding` is None, the returned pytree will be fully replicated.
+        If `dtype` is not None, the arrays will be cast to the specified dtype.
+    """
+
     # TODO: handle non-numpy inputs?
     pytree = to_global_array(pytree, pytree_sharding)
 
@@ -197,7 +276,19 @@ def to_devices(pytree, pytree_sharding=None, dtype=None):
     )(pytree)
 
 
-def get_mesh(n_data_parallel=1, n_model_parallel=-1, devices=None):
+def get_mesh(n_data_parallel:int=1, n_model_parallel:int=-1, devices:list[jax.Device]=None) -> jax.sharding.Mesh:
+    """
+    Creates a JAX mesh for data and model parallelism.
+
+    Args:
+        n_data_parallel (int): Number of data parallel devices. Default is 1.
+        n_model_parallel (int): Number of model parallel devices. Default is -1, which uses all available devices.
+        devices (list[jax.Device]): List of JAX devices to use. If None, uses all available devices.
+
+    Returns:
+        jax.sharding.Mesh: A JAX mesh with the specified data and model parallel dimensions.
+    """
+
     if devices is None:
         devices = jax.devices()
 

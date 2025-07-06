@@ -263,8 +263,8 @@ def compute_alm_loss(chunk_kind, args, loss_args, epsilon=1e-6):
     elif args.alm_diff_fn == "binary_ce":
 
         def binary_ce(log_y_true, log_y_pred):
-            log_y_true = (log_y_true.astype(jnp.float32) / args.bce_temp) - epsilon
-            log_y_pred = (log_y_pred.astype(jnp.float32) / args.bce_temp) - epsilon
+            log_y_true = (log_y_true.astype(jnp.float32) / args.binarization_temp) - epsilon
+            log_y_pred = (log_y_pred.astype(jnp.float32) / args.binarization_temp) - epsilon
 
             return -(
                 jnp.exp(log_y_true) * log_y_pred
@@ -275,8 +275,8 @@ def compute_alm_loss(chunk_kind, args, loss_args, epsilon=1e-6):
     elif args.alm_diff_fn == "reverse_binary_kl":
 
         def reverse_binary_kl(log_y_true, log_y_pred):
-            log_y_true = (log_y_true.astype(jnp.float32) / args.bce_temp) - epsilon
-            log_y_pred = (log_y_pred.astype(jnp.float32) / args.bce_temp) - epsilon
+            log_y_true = (log_y_true.astype(jnp.float32) / args.binarization_temp) - epsilon
+            log_y_pred = (log_y_pred.astype(jnp.float32) / args.binarization_temp) - epsilon
 
             return jnp.exp(log_y_pred) * (log_y_pred - log_y_true) + (
                 -jnp.expm1(log_y_pred) * (log1mexp(log_y_pred) - log1mexp(log_y_true))
@@ -297,8 +297,8 @@ def compute_alm_loss(chunk_kind, args, loss_args, epsilon=1e-6):
     elif args.alm_diff_fn == "abs_exp":
 
         def abs_exp(log_y_true, log_y_pred):
-            log_y_true = (log_y_true.astype(jnp.float32) / args.bce_temp) - epsilon
-            log_y_pred = (log_y_pred.astype(jnp.float32) / args.bce_temp) - epsilon
+            log_y_true = (log_y_true.astype(jnp.float32) / args.binarization_temp) - epsilon
+            log_y_pred = (log_y_pred.astype(jnp.float32) / args.binarization_temp) - epsilon
 
             return jnp.abs(jnp.exp(log_y_true) - jnp.exp(log_y_pred))
 
@@ -326,13 +326,13 @@ def compute_alm_loss(chunk_kind, args, loss_args, epsilon=1e-6):
         diff_fn = renyi
     elif args.alm_diff_fn == "joschu_k2":
         def joschu_k2(log_y_true, log_y_pred):
-            logr = (log_y_true - log_y_pred) / args.bce_temp
+            logr = (log_y_true - log_y_pred) / args.binarization_temp
             return (logr ** 2) / 2
 
         diff_fn = joschu_k2
     elif args.alm_diff_fn == "joschu_k3":
         def joschu_k3(log_y_true, log_y_pred):
-            logr = (log_y_true - log_y_pred) / args.bce_temp
+            logr = (log_y_true - log_y_pred) / args.binarization_temp
 
             return (jnp.exp(logr) - 1) - logr
 
@@ -605,151 +605,6 @@ def compute_alm_loss(chunk_kind, args, loss_args, epsilon=1e-6):
     distill_main_path_loss = elementwise_loss.mean() / len(args.distill_chunk_sizes)
 
     return distill_main_path_loss
-
-
-def compute_alm_side_path_loss(
-    chunk_kind, student_mapping, teacher_mapping, args, loss_args, epsilon=1e-8
-):
-    if chunk_kind == "unconstrained":
-        alignment_matrix_a = loss_args.batch["alignment_matrix_a_unconstrained"]
-        alignment_matrix_b = loss_args.batch["alignment_matrix_b_unconstrained"]
-        global_alignment_matrix_a = loss_args.global_batch[
-            "alignment_matrix_a_unconstrained"
-        ]
-        global_alignment_matrix_b = loss_args.global_batch[
-            "alignment_matrix_b_unconstrained"
-        ]
-    elif chunk_kind == "unbiased":
-        alignment_matrix_a = loss_args.batch["alignment_matrix_a_unbiased"]
-        alignment_matrix_b = loss_args.batch["alignment_matrix_b_unbiased"]
-        global_alignment_matrix_a = loss_args.global_batch[
-            "alignment_matrix_a_unbiased"
-        ]
-        global_alignment_matrix_b = loss_args.global_batch[
-            "alignment_matrix_b_unbiased"
-        ]
-    elif chunk_kind == "space":
-        alignment_matrix_a = loss_args.batch["alignment_matrix_a_space"]
-        alignment_matrix_b = loss_args.batch["alignment_matrix_b_space"]
-        global_alignment_matrix_a = loss_args.global_batch["alignment_matrix_a_space"]
-        global_alignment_matrix_b = loss_args.global_batch["alignment_matrix_b_space"]
-    else:
-        raise ValueError(f"Unknown chunk kind: {chunk_kind}")
-
-    alignment_matrix_a = alignment_matrix_a.at[:, :-1].set(
-        alignment_matrix_a[:, :-1] & loss_args.batch["loss_mask_new"][:, 1:, None]
-    )
-    alignment_matrix_b = alignment_matrix_b.at[:, :-1].set(
-        alignment_matrix_b[:, :-1] & loss_args.batch["loss_mask_original"][:, 1:, None]
-    )
-    global_alignment_matrix_a = global_alignment_matrix_a.at[:, :-1].set(
-        global_alignment_matrix_a[:, :-1]
-        & loss_args.global_batch["loss_mask_new"][:, 1:, None]
-    )
-    global_alignment_matrix_b = global_alignment_matrix_b.at[:, :-1].set(
-        global_alignment_matrix_b[:, :-1]
-        & loss_args.global_batch["loss_mask_original"][:, 1:, None]
-    )
-
-    alignment_matrix_b_last_only_index, _ = get_last_index_per_column(
-        alignment_matrix_b
-    )
-    alignment_matrix_a_last_only_index, mask = get_last_index_per_column(
-        alignment_matrix_a
-    )
-    _, global_mask = get_last_index_per_column(global_alignment_matrix_a)
-
-    s_aligned_logprobs = jnp.take_along_axis(
-        loss_args.student_logprobs,
-        alignment_matrix_a_last_only_index[..., None],
-        axis=-2,
-    )[..., student_mapping]
-    t_aligned_logprobs = jnp.take_along_axis(
-        loss_args.teacher_logprobs,
-        alignment_matrix_b_last_only_index[..., None],
-        axis=-2,
-    )[..., teacher_mapping]
-    s_aligned_logits = jnp.take_along_axis(
-        loss_args.student_logits,
-        alignment_matrix_a_last_only_index[..., None],
-        axis=-2,
-    )[..., student_mapping]
-    t_aligned_logits = jnp.take_along_axis(
-        loss_args.teacher_logits,
-        alignment_matrix_b_last_only_index[..., None],
-        axis=-2,
-    )[..., teacher_mapping]
-
-    s_aligned_probs = jnp.exp(s_aligned_logprobs)
-    t_aligned_probs = jnp.exp(t_aligned_logprobs)
-
-    loss_args.scalar_report["student_side_path_aligned_pmass"] = (
-        s_aligned_probs.sum(-1) * mask
-    ).mean() / mask.mean()
-    loss_args.scalar_report["teacher_side_path_aligned_pmass"] = (
-        t_aligned_probs.sum(-1) * mask
-    ).mean() / mask.mean()
-
-    if args.side_path_distance_fn == "kl":
-        s_remainder_probs = jnp.maximum(1 - s_aligned_probs.sum(-1), epsilon)
-        t_remainder_probs = jnp.maximum(1 - t_aligned_probs.sum(-1), epsilon)
-
-        elementwise_loss = (
-            (t_aligned_probs * (t_aligned_logprobs - s_aligned_logprobs)).sum(-1)
-            + (
-                t_remainder_probs
-                * (jnp.log(t_remainder_probs) - jnp.log(s_remainder_probs))
-            )
-        ) * mask
-        side_path_loss = elementwise_loss.mean() / global_mask.mean()
-    elif args.side_path_distance_fn == "reverse_kl":
-        s_remainder_probs = jnp.maximum(1 - s_aligned_probs.sum(-1), epsilon)
-        t_remainder_probs = jnp.maximum(1 - t_aligned_probs.sum(-1), epsilon)
-
-        elementwise_loss = (
-            (s_aligned_probs * (s_aligned_logprobs - t_aligned_logprobs)).sum(-1)
-            + (
-                s_remainder_probs
-                * (jnp.log(s_remainder_probs) - jnp.log(t_remainder_probs))
-            )
-        ) * mask
-        side_path_loss = elementwise_loss.mean() / global_mask.mean()
-    elif args.side_path_distance_fn == "kl_subset":
-        s_aligned_logprobs_subset = jax.nn.log_softmax(s_aligned_logits, axis=-1)
-        t_aligned_logprobs_subset = jax.nn.log_softmax(t_aligned_logits, axis=-1)
-
-        elementwise_loss = (
-            (
-                jnp.exp(t_aligned_logprobs_subset)
-                * (t_aligned_logprobs_subset - s_aligned_logprobs_subset)
-            ).sum(-1)
-        ) * mask
-        side_path_loss = elementwise_loss.mean() / global_mask.mean()
-    elif args.side_path_distance_fn == "reverse_kl_subset":
-        s_aligned_logprobs_subset = jax.nn.log_softmax(s_aligned_logits, axis=-1)
-        t_aligned_logprobs_subset = jax.nn.log_softmax(t_aligned_logits, axis=-1)
-
-        elementwise_loss = (
-            (
-                jnp.exp(s_aligned_logprobs_subset)
-                * (s_aligned_logprobs_subset - t_aligned_logprobs_subset)
-            ).sum(-1)
-        ) * mask
-        side_path_loss = elementwise_loss.mean() / global_mask.mean()
-    elif args.side_path_distance_fn == "log_abs":
-        elementwise_loss = (
-            jnp.abs(s_aligned_logprobs - t_aligned_logprobs).mean(-1) * mask
-        )
-        side_path_loss = elementwise_loss.mean() / global_mask.mean()
-    elif args.side_path_distance_fn == "abs":
-        elementwise_loss = jnp.abs(s_aligned_probs - t_aligned_probs).sum(-1) * mask
-        side_path_loss = elementwise_loss.mean() / global_mask.mean()
-    else:
-        raise ValueError(
-            f"Unknown side path distance function: {args.side_path_distance_fn}"
-        )
-
-    return side_path_loss
 
 
 def compute_baseline_dskd_loss(args, loss_args, epsilon=1e-8):

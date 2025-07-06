@@ -147,10 +147,12 @@ class TPULlamaConfig(PretrainedConfig):
         attention_dropout=0.0,
         mlp_bias=False,
         head_dim=None,
+        add_qk_norm=False, # Qwen3 compatibility
         expand_input_ids=False, # Transformers-native PyTorch generation support
         expand_input_ids_maxlen=None,
         expand_input_ids_vocab_size=None,
         expand_input_ids_dict=None,
+        skip_out_norm=False,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -182,10 +184,14 @@ class TPULlamaConfig(PretrainedConfig):
             self.rope_scaling["rope_type"] = self.rope_scaling["type"]
         rope_config_validation(self)
 
+        self.add_qk_norm = add_qk_norm  # Qwen3 compatibility
+
         self.expand_input_ids = expand_input_ids
         self.expand_input_ids_maxlen = expand_input_ids_maxlen
         self.expand_input_ids_vocab_size = expand_input_ids_vocab_size
         self.expand_input_ids_dict = expand_input_ids_dict
+
+        self.skip_out_norm = skip_out_norm
 
         super().__init__(
             pad_token_id=pad_token_id,

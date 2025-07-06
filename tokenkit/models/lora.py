@@ -1,3 +1,7 @@
+"""
+Tokenkit LoRA implementation.
+"""
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -23,9 +27,31 @@ LORA_PATTERNS = {
 }
 LORA_PATTERNS["tpu_llama"] = LORA_PATTERNS["llama"]
 LORA_PATTERNS["tpu_gemma2"] = LORA_PATTERNS["gemma2"]
+LORA_PATTERNS["gemma3"] = LORA_PATTERNS["gemma2"]
+LORA_PATTERNS["tpu_gemma3"] = LORA_PATTERNS["gemma2"]
 
 
 def init_lora_params(args, params, model_type, seed, dtype=jnp.float32):
+    """
+    Initializes LoRA a and b matrices.
+    LoRA positions are hardcoded to Q/K/V/O projections and Up/Down/Gate projections.
+
+    Args:
+        args: training arguments.
+        params: model parameters.
+        model_type: HF model type, e.g. "llama", "gemma2".
+        seed: random seed for initialization.
+
+    Returns:
+        A pytree of LoRA parameters with the same leaves as `params`, where every leaf is either:
+            - (i) an empty array (indicating no LoRA params for this leaf),
+            - (ii) a dict with keys "a" and "b", where:
+                - "a" is a matrix of shape (lora_rank, a_dim) initialized
+                  with random values scaled by 1/lora_rank,
+                - "b" is a matrix of shape (b_dim, lora_rank) initialized
+                  with zeros, where b_dim and a_dim are the dimensions of the original parameter.
+    """
+
     def iter_keys(key):
         while True:
             key, out_key = jax.random.split(key)
@@ -61,6 +87,22 @@ def init_lora_params(args, params, model_type, seed, dtype=jnp.float32):
 
 
 def materialize_lora(param_tree, lora_param_tree, alpha):
+    """
+    Materializes (adds) LoRA parameters into the original parameters.
+
+    Args:
+        param_tree: pytree of original model parameters.
+        lora_param_tree: pytree of LoRA parameters, where each leaf is either:
+            - (i) an empty array (indicating no LoRA params for this leaf),
+            - (ii) a dict with keys "a" and "b", where:
+                - "a" is a matrix of shape (lora_rank, a_dim),
+                - "b" is a matrix of shape (b_dim, lora_rank).
+        alpha: scaling factor for LoRA parameters.
+
+    Returns:
+        A pytree of modified parameters with LoRA parameters materialized (added).
+    """
+
     def materialize(param, lora_params):
         if not isinstance(lora_params, dict):
             assert lora_params.shape[0] == 0
@@ -74,9 +116,28 @@ def materialize_lora(param_tree, lora_param_tree, alpha):
     return jax.tree.map(materialize, param_tree, lora_param_tree)
 
 
-# NOTE: not clear if this is save w.r.t. rounding errors. probably not? dangerous.
-# NOTE: update: no instability so far, seems safe in fp32. but still dangerous.
 def dematerialize_lora(param_tree, lora_param_tree, alpha):
+    """
+    Dematerializes (removes) LoRA parameters from the original parameters.
+
+    Args:
+        param_tree: pytree of original model parameters.
+        lora_param_tree: pytree of LoRA parameters, where each leaf is either:
+            - (i) an empty array (indicating no LoRA params for this leaf),
+            - (ii) a dict with keys "a" and "b", where:
+                - "a" is a matrix of shape (lora_rank, a_dim),
+                - "b" is a matrix of shape (b_dim, lora_rank).
+        alpha: scaling factor for LoRA parameters.
+
+    Returns:
+        A pytree of restored original parameters.
+
+    IMPORTANT: dematerialization does not exactly restore the original parameters due to
+    floating-point imprecision. However, the introduced error appears sufficiently small.
+    This makes Mat/Demat useful so that we do not need to store two copies of the model parameters
+    (original and LoRA-modified) in memory at the same time.
+    """
+
     def dematerialize(param, lora_params):
         if not isinstance(lora_params, dict):
             return param
