@@ -762,32 +762,32 @@ def main(args: CrossTokenizerDistillArgs):
             predicted_embeddings, NamedSharding(mesh, P("model", None, "data"))
         )
 
-    def compute_inputs_embeds(model_params, input_ids, expanded_input_ids):
-        """Compute the input embeddings, expanding if enabled."""
+    def compute_inputs_embeds(model, model_params, input_ids, expanded_input_ids):
+        """Compute the inputs embeds, expanding if enabled."""
 
-        input_embeddings = param.get(
-            model_params, param.get_input_embedding_path(student_config.model_type)
-        )
-
-        # NOTE: this assumes Llama/Gemma-style where position embeddings are part of attention mechanism
         if args.expand_input_ids:
-            standard_inputs_embeds = jnp.take(
-                input_embeddings,
+            standard_inputs_embeds = model.module.apply(
+                {"params": model_params},
                 input_ids,
-                axis=0,
+                method=model.module.embed,
             )
-            expanded_inputs_embeds = jnp.take(
-                model_params["original_embeddings"][:, 0, :],
+            model_params_with_original_embeddings = param.assign_embeddings(
+                model_params,
+                model_params["original_embeddings"],
+                config=student_config,
+            )
+            expanded_inputs_embeds = model.module.apply(
+                {"params": model_params_with_original_embeddings},
                 expanded_input_ids,
-                axis=0,
+                method=model.module.embed,
             )
 
             inputs_embeds = standard_inputs_embeds + expanded_inputs_embeds
         else:
-            inputs_embeds = jnp.take(
-                input_embeddings,
+            inputs_embeds = model.module.apply(
+                {"params": model_params},
                 input_ids,
-                axis=0,
+                method=model.module.embed,
             )
 
         return inputs_embeds
@@ -861,6 +861,7 @@ def main(args: CrossTokenizerDistillArgs):
                 teacher_out = teacher_logits = teacher_logprobs = teacher_probs = None
 
             inputs_embeds_new = compute_inputs_embeds(
+                new_model,
                 model_params_with_predicted_embeddings,
                 batch["input_ids_new"],
                 batch.get("expanded_input_ids_new"),
@@ -1208,6 +1209,7 @@ def main(args: CrossTokenizerDistillArgs):
         )
 
         inputs_embeds_new = compute_inputs_embeds(
+            new_model,
             model_params_with_embeddings,
             batch["input_ids_new"],
         )
@@ -1430,6 +1432,7 @@ def main(args: CrossTokenizerDistillArgs):
                     atol=eval.ATOL,
                 ):
                     inputs_embeds = compute_inputs_embeds(
+                        new_model,
                         params,
                         input_ids,
                         expanded_input_ids,
